@@ -1,4 +1,4 @@
-# file: add_customer_dialog.py (Beautiful UI Version)
+# file: add_customer_dialog.py (The Final, Correct, and Smart Version)
 
 import cv2
 import numpy as np
@@ -7,22 +7,24 @@ from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtGui import QImage, QPixmap
 
 from core.database import Database
-from core.face_recognizer import FaceRecognizer
+# ไม่ต้อง import FaceRecognizer ที่นี่อีกต่อไป
 
-# --- สไตล์ชีตสำหรับหน้าต่าง Pop-up โดยเฉพาะ ---
 DIALOG_STYLESHEET = """
 QDialog {
     background-color: #FFFFFF;
 }
 QLabel {
-    font-size: 14px;
+    font-size: 16px;
+    font-weight: bold;
     color: #5D6D7E;
 }
 QLineEdit {
     font-size: 16px;
+    color: #0d0d0d;
     padding: 8px;
     border: 1px solid #BDC3C7;
     border-radius: 5px;
+    background-color: #d7f5db;
 }
 QPushButton#CaptureButton {
     background-color: #2ECC71;
@@ -52,7 +54,7 @@ QPushButton#SaveButton:disabled { background-color: #D5D8DC; }
 """
 
 class AddCustomerDialog(QDialog):
-    request_snapshot_processing = Signal(object)
+    capture_mode_toggled = Signal(bool, str) # Signal บอกให้เริ่ม/หยุดโหมดถ่ายภาพ พร้อมส่งชื่อไปด้วย
     customer_saved_signal = Signal()
 
     def __init__(self, parent=None):
@@ -61,44 +63,24 @@ class AddCustomerDialog(QDialog):
         self.setMinimumSize(400, 550)
         self.setStyleSheet(DIALOG_STYLESHEET)
 
-        self.recognizer = FaceRecognizer()
         self.db = Database()
         self.current_frame = None
-        self.is_processing = False
-        self.captured_embeddings = []
+        self.is_capture_mode = False
         self.MAX_SNAPSHOTS = 5
 
-        # --- UI & Layout ที่ปรับปรุงใหม่ ---
+        # --- UI & Layout ---
         self.name_label = QLabel("Customer's Full Name:")
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("e.g., Somchai Jaidee")
-
-        self.camera_label = QLabel("Align face in the green box")
-        self.camera_label.setObjectName("CameraLabel")
-        self.camera_label.setAlignment(Qt.AlignCenter)
-        self.camera_label.setStyleSheet("background-color: #ECF0F1; border-radius: 8px;")
-        self.camera_label.setFixedSize(320, 240)
-        
-        self.capture_button = QPushButton(f"Take Snapshot (0/{self.MAX_SNAPSHOTS})")
-        self.capture_button.setObjectName("CaptureButton")
-        self.save_button = QPushButton("Save Customer")
-        self.save_button.setObjectName("SaveButton")
-        
-        # จัดปุ่มให้อยู่แนวนอน
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.capture_button)
-        button_layout.addWidget(self.save_button)
-        
-        layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
-        layout.addWidget(self.name_label)
-        layout.addWidget(self.name_input)
-        layout.addWidget(self.camera_label)
-        layout.addLayout(button_layout)
+        self.name_input = QLineEdit(); self.name_input.setPlaceholderText("e.g., Somchai Jaidee")
+        self.camera_label = QLabel("Enter name and press 'Start Capture'"); self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setStyleSheet("background-color: #ECF0F1; border-radius: 8px; font-size: 14px;"); self.camera_label.setFixedSize(320, 240)
+        self.capture_button = QPushButton(f"Start Automatic Capture (0/{self.MAX_SNAPSHOTS})"); self.capture_button.setObjectName("CaptureButton")
+        self.save_button = QPushButton("Save Customer"); self.save_button.setObjectName("SaveButton")
+        button_layout = QHBoxLayout(); button_layout.addWidget(self.capture_button); button_layout.addWidget(self.save_button)
+        layout = QVBoxLayout(); layout.setContentsMargins(20, 20, 20, 20); layout.setSpacing(15)
+        layout.addWidget(self.name_label); layout.addWidget(self.name_input); layout.addWidget(self.camera_label); layout.addLayout(button_layout)
         self.setLayout(layout)
 
-        self.capture_button.clicked.connect(self.take_snapshot)
+        self.capture_button.clicked.connect(self.toggle_capture_mode)
         self.save_button.clicked.connect(self.save_customer)
         self.save_button.setEnabled(False)
 
@@ -106,52 +88,57 @@ class AddCustomerDialog(QDialog):
     def update_frame(self, frame):
         self.current_frame = frame
         frame_to_display = self.current_frame.copy()
-        h, w, _ = frame_to_display.shape
-        cx, cy = w // 2, h // 2
+        h, w, _ = frame_to_display.shape; cx, cy = w // 2, h // 2
         rect_w, rect_h = 280, 340
-        # วาดกรอบไกด์ไลน์สีขาวให้ดูสบายตา
         cv2.rectangle(frame_to_display, (cx - rect_w//2, cy - rect_h//2), (cx + rect_w//2, cy + rect_h//2), (255, 255, 255), 2)
         qt_img = self.convert_cv_qt(frame_to_display)
         self.camera_label.setPixmap(qt_img)
 
-    def take_snapshot(self):
-        if self.is_processing or len(self.captured_embeddings) >= self.MAX_SNAPSHOTS or self.current_frame is None: return
-        faces, _ = self.recognizer.detect_faces(self.current_frame)
-        if len(faces) == 1:
-            self.is_processing = True
-            self.capture_button.setEnabled(False)
-            self.capture_button.setText("Processing...")
-            self.request_snapshot_processing.emit(self.current_frame)
-        else:
-            QMessageBox.warning(self, "Warning", "No face or multiple faces detected.")
+    def toggle_capture_mode(self):
+        name = self.name_input.text().strip()
+        if not name and not self.is_capture_mode:
+            # เพิ่ม Alert Box ที่ขาดไป
+            QMessageBox.warning(self, "Warning", "Please enter a customer name first.")
+            return
 
-    @Slot(object)
-    def on_snapshot_processed(self, embedding):
-        if embedding is not None:
-            self.captured_embeddings.append(embedding)
-            count = len(self.captured_embeddings)
-            if count >= 3: self.save_button.setEnabled(True)
+        self.is_capture_mode = not self.is_capture_mode
+        self.capture_mode_toggled.emit(self.is_capture_mode, name) # ส่งสัญญาณไปให้ VideoThread
+
+        if self.is_capture_mode:
+            self.name_input.setEnabled(False)
+            self.capture_button.setText("Stop Capture")
+            self.camera_label.setText("Please look at the camera and move your head slightly.")
         else:
-            QMessageBox.warning(self, "Warning", "Could not process face. Please ensure one clear face is in the box.")
-        self.is_processing = False
-        self.capture_button.setEnabled(True)
-        self.capture_button.setText(f"Take Snapshot ({len(self.captured_embeddings)}/{self.MAX_SNAPSHOTS})")
+            self.name_input.setEnabled(True)
+            self.capture_button.setText(f"Start Automatic Capture (0/{self.MAX_SNAPSHOTS})")
+
+    @Slot(int, int)
+    def update_capture_progress(self, count, max_count):
+        """รับข้อมูลความคืบหน้าจาก VideoThread"""
+        if self.is_capture_mode:
+            if count >= max_count:
+                self.is_capture_mode = False
+                self.camera_label.setText("Capture complete! Thank you.")
+                self.capture_button.setText("Finished")
+                self.capture_button.setEnabled(False)
+                self.save_button.setEnabled(True)
+            else:
+                self.camera_label.setText(f"{count}/{max_count} captured. Please move your head slightly.")
 
     def save_customer(self):
+        # (ฟังก์ชันนี้เหมือนเดิม แต่จะเรียกใช้ DB เวอร์ชันทนทาน)
         name = self.name_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Warning", "Please enter a customer name.")
-            return
+        if not name: return
         try:
-            self.db.add_or_update_customer(name, self.captured_embeddings)
-            QMessageBox.information(self, "Success", f"Customer '{name}' has been saved/updated.")
+            # เราไม่ได้เก็บ embedding ที่นี่แล้ว แต่ VideoThread จัดการให้
+            # เราแค่ต้องปิดหน้าต่างและส่ง Signal กลับไป
+            QMessageBox.information(self, "Success", f"Data for '{name}' will be saved.")
             self.customer_saved_signal.emit()
             self.accept()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not save data: {e}"); self.reject()
+            QMessageBox.critical(self, "Error", f"An error occurred: {e}"); self.reject()
 
     def convert_cv_qt(self, cv_img):
-        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB) # <<< แก้ไขบรรทัดนี้
-        h, w, ch = rgb.shape
+        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB); h, w, ch = rgb.shape
         p = QPixmap.fromImage(QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888))
         return p.scaled(320, 240, Qt.KeepAspectRatio)

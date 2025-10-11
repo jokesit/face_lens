@@ -1,3 +1,5 @@
+# file: core/database.py (Robust Version)
+
 import sqlite3
 import numpy as np
 import io
@@ -5,90 +7,82 @@ import os
 
 class Database:
     def __init__(self, db_path='data/facelens.db'):
-        """
-        คลาสสำหรับจัดการฐานข้อมูล SQLite ทั้งหมด
-        """
-        # --- 2. เพิ่มโค้ด 2 บรรทัดนี้ ---
-        # สร้าง directory ถ้ายังไม่มี
         db_dir = os.path.dirname(db_path)
         os.makedirs(db_dir, exist_ok=True)
-        # -----------------------------
-
-        # แปลง numpy array เป็น text และกลับกัน
         sqlite3.register_adapter(np.ndarray, self.adapt_array)
         sqlite3.register_converter("array", self.convert_array)
-
-        self.db_path = db_path
         self.conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
         self.create_tables()
 
     def adapt_array(self, arr):
-        """แปลง numpy array เป็น binary เพื่อเก็บใน DB"""
-        out = io.BytesIO()
-        np.save(out, arr)
-        out.seek(0)
+        out = io.BytesIO(); np.save(out, arr); out.seek(0)
         return sqlite3.Binary(out.read())
 
     def convert_array(self, text):
-        """แปลง binary กลับเป็น numpy array"""
-        out = io.BytesIO(text)
-        out.seek(0)
-        return np.load(out)
+        out = io.BytesIO(text); out.seek(0)
+        # เพิ่ม try-except เพื่อป้องกันข้อมูลเสียหาย
+        try:
+            return np.load(out)
+        except:
+            return None
 
     def create_tables(self):
-        """สร้างตารางถ้ายังไม่มี"""
         cursor = self.conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS customers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS embeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_id INTEGER,
-                embedding array,
-                FOREIGN KEY (customer_id) REFERENCES customers (id)
+                name TEXT NOT NULL UNIQUE,
+                avg_embedding array,
+                image_count INTEGER NOT NULL
             )
         ''')
         self.conn.commit()
 
-    def add_or_update_customer(self, name, embeddings):
-        """เพิ่มลูกค้าใหม่ หรืออัปเดต embeddings ของลูกค้าเดิม"""
+    def add_or_update_customer(self, name, new_embeddings):
+        # 1. กรองค่า None ออกตั้งแต่ต้นทาง
+        valid_embeddings = [emb for emb in new_embeddings if emb is not None]
+        if not valid_embeddings:
+            print("Warning: No valid embeddings to save.")
+            return
+
         cursor = self.conn.cursor()
-        # ตรวจสอบว่ามีชื่อนี้อยู่แล้วหรือไม่
-        cursor.execute("SELECT id FROM customers WHERE name = ?", (name,))
+        cursor.execute("SELECT id, avg_embedding, image_count FROM customers WHERE name = ?", (name,))
         result = cursor.fetchone()
+        
+        new_avg_embedding = np.mean(valid_embeddings, axis=0)
+        num_new_images = len(valid_embeddings)
 
         if result:
-            # ถ้ามี ให้อัปเดต
-            customer_id = result[0]
-            print(f"Updating existing customer: {name} (ID: {customer_id})")
-        else:
-            # ถ้าไม่มี ให้เพิ่มใหม่
-            cursor.execute("INSERT INTO customers (name) VALUES (?)", (name,))
-            customer_id = cursor.lastrowid
-            print(f"Adding new customer: {name} (ID: {customer_id})")
+            customer_id, old_avg_embedding, old_image_count = result
+            if old_avg_embedding is None: # กรณีข้อมูลเก่าเสียหาย
+                old_avg_embedding = np.zeros_like(new_avg_embedding)
+                old_image_count = 0
+            
+            total_images = old_image_count + num_new_images
+            updated_avg_embedding = ((old_avg_embedding * old_image_count) + (new_avg_embedding * num_new_images)) / total_images
+            updated_avg_embedding /= np.linalg.norm(updated_avg_embedding)
 
-        # เพิ่ม embeddings ทั้งหมดสำหรับลูกค้านี้
-        for emb in embeddings:
-            cursor.execute("INSERT INTO embeddings (customer_id, embedding) VALUES (?, ?)", (customer_id, emb))
+            cursor.execute("UPDATE customers SET avg_embedding = ?, image_count = ? WHERE id = ?", (updated_avg_embedding, total_images, customer_id))
+            print(f"Updating customer {name}. Total images: {total_images}")
+        else:
+            new_avg_embedding /= np.linalg.norm(new_avg_embedding)
+            cursor.execute("INSERT INTO customers (name, avg_embedding, image_count) VALUES (?, ?, ?)", (name, new_avg_embedding, num_new_images))
+            print(f"Adding new customer {name} with {num_new_images} images.")
         
         self.conn.commit()
-        print(f"Successfully added {len(embeddings)} new embeddings for {name}.")
 
     def get_all_data_for_faiss(self):
-        """ดึงข้อมูลทั้งหมดเพื่อใช้สร้าง Faiss Index"""
         cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT e.id, c.name, e.embedding
-            FROM embeddings e
-            JOIN customers c ON e.customer_id = c.id
-        ''')
-        # คืนค่าเป็น list ของ (embedding_id, customer_name, embedding_array)
-        return cursor.fetchall()
+        cursor.execute("SELECT id, name, avg_embedding FROM customers")
+        
+        # 2. กรองข้อมูลที่ไม่สมบูรณ์ออกก่อนส่งไปสร้าง Index
+        all_data = cursor.fetchall()
+        clean_data = []
+        for row in all_data:
+            # ตรวจสอบว่า avg_embedding ไม่ใช่ None และเป็น numpy array จริงๆ
+            if row[2] is not None and isinstance(row[2], np.ndarray):
+                clean_data.append(row)
+        return clean_data
 
     def __del__(self):
-        """ปิดการเชื่อมต่อเมื่อ object ถูกทำลาย"""
         self.conn.close()

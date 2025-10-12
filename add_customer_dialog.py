@@ -52,11 +52,13 @@ QPushButton#SaveButton:hover { background-color: #2980B9; }
 QPushButton#SaveButton:pressed { background-color: #1F618D; }
 QPushButton#SaveButton:disabled { background-color: #D5D8DC; }
 """
+# 555
 
 class AddCustomerDialog(QDialog):
     capture_mode_toggled = Signal(bool)
-    request_embedding_for_save = Signal(object, str)
+    request_verification_job = Signal(list, str)
     customer_saved_signal = Signal()
+    new_embedding_captured = Signal(object)
 
     VERIFICATION_THRESHOLD = 0.75
 
@@ -69,9 +71,9 @@ class AddCustomerDialog(QDialog):
         self.db = Database()
         self.is_capture_mode = False
         self.MAX_SNAPSHOTS = 5
-        self.captured_embeddings = [] # <<< เพิ่มบรรทัดที่ขาดหายไปกลับเข้ามา
+        self.captured_embeddings = []
+        self.current_frame = None
 
-        # (ส่วน UI และ Layout ที่เหลือเหมือนเดิมทุกประการ)
         self.name_label = QLabel("Customer's Full Name:")
         self.name_input = QLineEdit(); self.name_input.setPlaceholderText("e.g., Somchai Jaidee")
         self.camera_label = QLabel("Enter name and press 'Start Capture'"); self.camera_label.setAlignment(Qt.AlignCenter)
@@ -89,7 +91,8 @@ class AddCustomerDialog(QDialog):
 
     @Slot(np.ndarray)
     def update_frame(self, frame):
-        frame_to_display = frame.copy()
+        self.current_frame = frame
+        frame_to_display = self.current_frame.copy()
         h, w, _ = frame_to_display.shape; cx, cy = w // 2, h // 2
         rect_w, rect_h = 280, 340
         cv2.rectangle(frame_to_display, (cx - rect_w//2, cy - rect_h//2), (cx + rect_w//2, cy + rect_h//2), (255, 255, 255), 2)
@@ -119,24 +122,22 @@ class AddCustomerDialog(QDialog):
     
     @Slot(object)
     def add_captured_embedding(self, embedding):
-        """Slot ใหม่สำหรับรับ Embedding จาก VideoThread ทีละอัน"""
-        if embedding is not None:
-            self.captured_embeddings.append(embedding)
+        if embedding is not None: self.captured_embeddings.append(embedding)
 
     def save_customer_handler(self):
         name_to_save = self.name_input.text().strip()
         if not name_to_save:
             QMessageBox.warning(self, "Warning", "Please enter a customer name."); return
+        if not self.captured_embeddings:
+            QMessageBox.warning(self, "Warning", "No snapshots to save."); return
+            
         self.save_button.setEnabled(False); self.save_button.setText("Verifying...")
-        self.request_embedding_for_save.emit(self.captured_embeddings, name_to_save)
+        self.request_verification_job.emit(self.captured_embeddings, name_to_save)
 
-    @Slot(object, str, float)
-    def on_verification_finished(self, new_avg_embedding, name, distance):
+    @Slot(str, float)
+    def on_verification_finished(self, name, distance):
         self.save_button.setEnabled(True); self.save_button.setText("Save Customer")
-        if new_avg_embedding is None:
-            QMessageBox.critical(self, "Error", "Failed to create an average embedding from snapshots."); return
-
-        if distance is None:
+        if distance < 0: # ใช้ค่าติดลบเป็นตัวบ่งชี้ "ลูกค้าใหม่"
             self.perform_save(name, self.captured_embeddings)
         elif distance < self.VERIFICATION_THRESHOLD:
             reply = QMessageBox.question(self, "Confirm Update", f"A customer named '{name}' already exists, and the face seems to match.\n\nDo you want to add the new snapshots to their profile?", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)

@@ -1,9 +1,6 @@
-# file: core/database.py (Robust Version)
+# file: core/database.py (Final Version with Search)
 
-import sqlite3
-import numpy as np
-import io
-import os
+import sqlite3, numpy as np, io, os
 
 class Database:
     def __init__(self, db_path='data/facelens.db'):
@@ -20,11 +17,8 @@ class Database:
 
     def convert_array(self, text):
         out = io.BytesIO(text); out.seek(0)
-        # เพิ่ม try-except เพื่อป้องกันข้อมูลเสียหาย
-        try:
-            return np.load(out)
-        except:
-            return None
+        try: return np.load(out)
+        except: return None
 
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -38,50 +32,41 @@ class Database:
         ''')
         self.conn.commit()
 
+    def get_customer_by_name(self, name):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, name, avg_embedding, image_count FROM customers WHERE name = ?", (name,))
+        result = cursor.fetchone()
+        if result:
+            return {"id": result[0], "name": result[1], "avg_embedding": result[2], "image_count": result[3]}
+        return None
+
     def add_or_update_customer(self, name, new_embeddings):
-        # 1. กรองค่า None ออกตั้งแต่ต้นทาง
         valid_embeddings = [emb for emb in new_embeddings if emb is not None]
-        if not valid_embeddings:
-            print("Warning: No valid embeddings to save.")
-            return
+        if not valid_embeddings: return
 
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id, avg_embedding, image_count FROM customers WHERE name = ?", (name,))
-        result = cursor.fetchone()
-        
+        existing_customer = self.get_customer_by_name(name)
         new_avg_embedding = np.mean(valid_embeddings, axis=0)
         num_new_images = len(valid_embeddings)
 
-        if result:
-            customer_id, old_avg_embedding, old_image_count = result
-            if old_avg_embedding is None: # กรณีข้อมูลเก่าเสียหาย
-                old_avg_embedding = np.zeros_like(new_avg_embedding)
-                old_image_count = 0
+        if existing_customer:
+            old_avg_embedding = existing_customer['avg_embedding']
+            old_image_count = existing_customer['image_count']
+            if old_avg_embedding is None: old_avg_embedding, old_image_count = np.zeros_like(new_avg_embedding), 0
             
             total_images = old_image_count + num_new_images
             updated_avg_embedding = ((old_avg_embedding * old_image_count) + (new_avg_embedding * num_new_images)) / total_images
             updated_avg_embedding /= np.linalg.norm(updated_avg_embedding)
-
-            cursor.execute("UPDATE customers SET avg_embedding = ?, image_count = ? WHERE id = ?", (updated_avg_embedding, total_images, customer_id))
-            print(f"Updating customer {name}. Total images: {total_images}")
+            cursor.execute("UPDATE customers SET avg_embedding = ?, image_count = ? WHERE id = ?", (updated_avg_embedding, total_images, existing_customer['id']))
         else:
             new_avg_embedding /= np.linalg.norm(new_avg_embedding)
             cursor.execute("INSERT INTO customers (name, avg_embedding, image_count) VALUES (?, ?, ?)", (name, new_avg_embedding, num_new_images))
-            print(f"Adding new customer {name} with {num_new_images} images.")
-        
         self.conn.commit()
 
     def get_all_data_for_faiss(self):
         cursor = self.conn.cursor()
         cursor.execute("SELECT id, name, avg_embedding FROM customers")
-        
-        # 2. กรองข้อมูลที่ไม่สมบูรณ์ออกก่อนส่งไปสร้าง Index
-        all_data = cursor.fetchall()
-        clean_data = []
-        for row in all_data:
-            # ตรวจสอบว่า avg_embedding ไม่ใช่ None และเป็น numpy array จริงๆ
-            if row[2] is not None and isinstance(row[2], np.ndarray):
-                clean_data.append(row)
+        clean_data = [row for row in cursor.fetchall() if row[2] is not None and isinstance(row[2], np.ndarray)]
         return clean_data
 
     def __del__(self):

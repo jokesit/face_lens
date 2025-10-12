@@ -2,7 +2,7 @@
 
 import cv2
 import numpy as np
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QHBoxLayout
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QHBoxLayout, QInputDialog
 from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtGui import QImage, QPixmap
 
@@ -54,21 +54,24 @@ QPushButton#SaveButton:disabled { background-color: #D5D8DC; }
 """
 
 class AddCustomerDialog(QDialog):
-    capture_mode_toggled = Signal(bool, str) # Signal บอกให้เริ่ม/หยุดโหมดถ่ายภาพ พร้อมส่งชื่อไปด้วย
+    capture_mode_toggled = Signal(bool)
+    request_embedding_for_save = Signal(object, str)
     customer_saved_signal = Signal()
+
+    VERIFICATION_THRESHOLD = 0.75
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add/Update Customer")
         self.setMinimumSize(400, 550)
         self.setStyleSheet(DIALOG_STYLESHEET)
-
+        
         self.db = Database()
-        self.current_frame = None
         self.is_capture_mode = False
         self.MAX_SNAPSHOTS = 5
+        self.captured_embeddings = [] # <<< เพิ่มบรรทัดที่ขาดหายไปกลับเข้ามา
 
-        # --- UI & Layout ---
+        # (ส่วน UI และ Layout ที่เหลือเหมือนเดิมทุกประการ)
         self.name_label = QLabel("Customer's Full Name:")
         self.name_input = QLineEdit(); self.name_input.setPlaceholderText("e.g., Somchai Jaidee")
         self.camera_label = QLabel("Enter name and press 'Start Capture'"); self.camera_label.setAlignment(Qt.AlignCenter)
@@ -79,15 +82,14 @@ class AddCustomerDialog(QDialog):
         layout = QVBoxLayout(); layout.setContentsMargins(20, 20, 20, 20); layout.setSpacing(15)
         layout.addWidget(self.name_label); layout.addWidget(self.name_input); layout.addWidget(self.camera_label); layout.addLayout(button_layout)
         self.setLayout(layout)
-
+        
         self.capture_button.clicked.connect(self.toggle_capture_mode)
-        self.save_button.clicked.connect(self.save_customer)
+        self.save_button.clicked.connect(self.save_customer_handler)
         self.save_button.setEnabled(False)
 
     @Slot(np.ndarray)
     def update_frame(self, frame):
-        self.current_frame = frame
-        frame_to_display = self.current_frame.copy()
+        frame_to_display = frame.copy()
         h, w, _ = frame_to_display.shape; cx, cy = w // 2, h // 2
         rect_w, rect_h = 280, 340
         cv2.rectangle(frame_to_display, (cx - rect_w//2, cy - rect_h//2), (cx + rect_w//2, cy + rect_h//2), (255, 255, 255), 2)
@@ -97,47 +99,60 @@ class AddCustomerDialog(QDialog):
     def toggle_capture_mode(self):
         name = self.name_input.text().strip()
         if not name and not self.is_capture_mode:
-            # เพิ่ม Alert Box ที่ขาดไป
-            QMessageBox.warning(self, "Warning", "Please enter a customer name first.")
-            return
-
+            QMessageBox.warning(self, "Warning", "Please enter a customer name first."); return
         self.is_capture_mode = not self.is_capture_mode
-        self.capture_mode_toggled.emit(self.is_capture_mode, name) # ส่งสัญญาณไปให้ VideoThread
-
+        self.capture_mode_toggled.emit(self.is_capture_mode)
         if self.is_capture_mode:
-            self.name_input.setEnabled(False)
-            self.capture_button.setText("Stop Capture")
+            self.name_input.setEnabled(False); self.capture_button.setText("Stop Capture")
             self.camera_label.setText("Please look at the camera and move your head slightly.")
         else:
-            self.name_input.setEnabled(True)
-            self.capture_button.setText(f"Start Automatic Capture (0/{self.MAX_SNAPSHOTS})")
+            self.name_input.setEnabled(True); self.capture_button.setText(f"Start Automatic Capture (0/{self.MAX_SNAPSHOTS})")
 
     @Slot(int, int)
     def update_capture_progress(self, count, max_count):
-        """รับข้อมูลความคืบหน้าจาก VideoThread"""
         if self.is_capture_mode:
             if count >= max_count:
-                self.is_capture_mode = False
-                self.camera_label.setText("Capture complete! Thank you.")
-                self.capture_button.setText("Finished")
-                self.capture_button.setEnabled(False)
-                self.save_button.setEnabled(True)
+                self.is_capture_mode = False; self.camera_label.setText("Capture complete! Thank you.")
+                self.capture_button.setText("Finished"); self.capture_button.setEnabled(False); self.save_button.setEnabled(True)
             else:
                 self.camera_label.setText(f"{count}/{max_count} captured. Please move your head slightly.")
+    
+    @Slot(object)
+    def add_captured_embedding(self, embedding):
+        """Slot ใหม่สำหรับรับ Embedding จาก VideoThread ทีละอัน"""
+        if embedding is not None:
+            self.captured_embeddings.append(embedding)
 
-    def save_customer(self):
-        # (ฟังก์ชันนี้เหมือนเดิม แต่จะเรียกใช้ DB เวอร์ชันทนทาน)
-        name = self.name_input.text().strip()
-        if not name: return
+    def save_customer_handler(self):
+        name_to_save = self.name_input.text().strip()
+        if not name_to_save:
+            QMessageBox.warning(self, "Warning", "Please enter a customer name."); return
+        self.save_button.setEnabled(False); self.save_button.setText("Verifying...")
+        self.request_embedding_for_save.emit(self.captured_embeddings, name_to_save)
+
+    @Slot(object, str, float)
+    def on_verification_finished(self, new_avg_embedding, name, distance):
+        self.save_button.setEnabled(True); self.save_button.setText("Save Customer")
+        if new_avg_embedding is None:
+            QMessageBox.critical(self, "Error", "Failed to create an average embedding from snapshots."); return
+
+        if distance is None:
+            self.perform_save(name, self.captured_embeddings)
+        elif distance < self.VERIFICATION_THRESHOLD:
+            reply = QMessageBox.question(self, "Confirm Update", f"A customer named '{name}' already exists, and the face seems to match.\n\nDo you want to add the new snapshots to their profile?", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes: self.perform_save(name, self.captured_embeddings)
+        else:
+            new_name, ok = QInputDialog.getText(self, "Duplicate Name Detected", f"A customer named '{name}' already exists, but the face does not match.\n\nPlease provide a more specific name (e.g., '{name} (Hat Yai)'):")
+            if ok and new_name.strip(): self.perform_save(new_name.strip(), self.captured_embeddings)
+
+    def perform_save(self, name, embeddings):
         try:
-            # เราไม่ได้เก็บ embedding ที่นี่แล้ว แต่ VideoThread จัดการให้
-            # เราแค่ต้องปิดหน้าต่างและส่ง Signal กลับไป
-            QMessageBox.information(self, "Success", f"Data for '{name}' will be saved.")
-            self.customer_saved_signal.emit()
-            self.accept()
+            self.db.add_or_update_customer(name, embeddings)
+            QMessageBox.information(self, "Success", f"Customer '{name}' has been saved/updated.")
+            self.customer_saved_signal.emit(); self.accept()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred: {e}"); self.reject()
-
+            QMessageBox.critical(self, "Error", f"Could not save data: {e}"); self.reject()
+            
     def convert_cv_qt(self, cv_img):
         rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB); h, w, ch = rgb.shape
         p = QPixmap.fromImage(QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888))

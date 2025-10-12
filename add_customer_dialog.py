@@ -58,7 +58,6 @@ class AddCustomerDialog(QDialog):
     capture_mode_toggled = Signal(bool)
     request_verification_job = Signal(list, str)
     customer_saved_signal = Signal()
-    new_embedding_captured = Signal(object)
 
     VERIFICATION_THRESHOLD = 0.75
 
@@ -106,10 +105,11 @@ class AddCustomerDialog(QDialog):
         self.is_capture_mode = not self.is_capture_mode
         self.capture_mode_toggled.emit(self.is_capture_mode)
         if self.is_capture_mode:
+            self.captured_embeddings = [] # เริ่มถ่ายใหม่ทุกครั้ง
             self.name_input.setEnabled(False); self.capture_button.setText("Stop Capture")
             self.camera_label.setText("Please look at the camera and move your head slightly.")
         else:
-            self.name_input.setEnabled(True); self.capture_button.setText(f"Start Automatic Capture (0/{self.MAX_SNAPSHOTS})")
+            self.name_input.setEnabled(True); self.capture_button.setText(f"Start Automatic Capture ({len(self.captured_embeddings)}/{self.MAX_SNAPSHOTS})")
 
     @Slot(int, int)
     def update_capture_progress(self, count, max_count):

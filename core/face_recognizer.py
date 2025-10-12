@@ -1,89 +1,75 @@
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # ปิด warning TensorFlow
-
 import cv2
 import numpy as np
 import mediapipe as mp
-import traceback
 from deepface import DeepFace
-
+import os
+import hashlib
+from collections import OrderedDict
 
 class FaceRecognizer:
-    def __init__(self, detector_confidence=0.7, model_name="ArcFace"):
-        self.model_name = model_name
+    def __init__(self):
         print("FaceRecognizer initializing...")
-
-        # Mediapipe face detection
         self.mp_face_detection = mp.solutions.face_detection
-        self.face_detector = self.mp_face_detection.FaceDetection(
-            min_detection_confidence=detector_confidence
-        )
-
-        self.model = None
-        try:
-            print(f"Loading {model_name} model (this may take a few seconds)...")
-            self.model = DeepFace.build_model(model_name)
-            print(f"{model_name} model loaded successfully.")
-        except Exception as e:
-            print(f"Failed to load {model_name} model:", e)
-            traceback.print_exc()
-            self.model = None
+        self.face_detector = self.mp_face_detection.FaceDetection(min_detection_confidence=0.7)
+        self.embedding_cache = OrderedDict()
+        self.CACHE_SIZE = 200
 
     def detect_faces(self, image):
-        """Detect faces and return cropped BGR faces and bounding boxes."""
+        # (ฟังก์ชันนี้สมบูรณ์แล้ว ไม่ต้องแก้ไข)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self.face_detector.process(rgb_image)
         cropped_faces, bounding_boxes = [], []
-
-        if results and results.detections:
+        if results.detections:
             h, w, _ = image.shape
-            for det in results.detections:
-                box = det.location_data.relative_bounding_box
-                x, y = int(box.xmin * w), int(box.ymin * h)
-                bw, bh = int(box.width * w), int(box.height * h)
+            for detection in results.detections:
+                box = detection.location_data.relative_bounding_box
+                x, y, width, height = int(box.xmin * w), int(box.ymin * h), int(box.width * w), int(box.height * h)
                 x, y = max(0, x), max(0, y)
-                x2, y2 = min(w, x + bw), min(h, y + bh)
-                face_img = image[y:y2, x:x2]
-
+                face_img = image[y:y+height, x:x+width]
                 if face_img.size > 0:
                     cropped_faces.append(face_img)
-                    bounding_boxes.append((x, y, x2 - x, y2 - y))
-
+                    bounding_boxes.append((x, y, width, height))
         return cropped_faces, bounding_boxes
+        
+    def get_embedding(self, face_image):
+        """
+        ฟังก์ชันเวอร์ชันสมบูรณ์: ใช้ Cache + ไฟล์ชั่วคราวเพื่อความเร็วและความเสถียร
+        """
+        image_bytes = face_image.tobytes()
+        image_hash = hashlib.sha256(image_bytes).hexdigest()
 
-    def _preprocess_for_arcface(self, face_bgr):
-        """Resize & preprocess for ArcFace model input."""
+        if image_hash in self.embedding_cache:
+            self.embedding_cache.move_to_end(image_hash)
+            return self.embedding_cache[image_hash]
+        
+        # --- ถ้าไม่เจอในแคช ให้ใช้วิธีไฟล์ชั่วคราวที่เสถียร ---
+        temp_file_path = f"temp_face_{image_hash}.jpg" # สร้างชื่อไฟล์ที่ไม่ซ้ำกัน
+        embedding = None
         try:
-            if face_bgr is None or face_bgr.size == 0:
-                return None
-            face = cv2.resize(face_bgr, (112, 112), interpolation=cv2.INTER_AREA)
-            face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            face = face.astype('float32')
-            face = np.expand_dims(face, axis=0)
-            return face
-        except Exception as e:
-            print("Preprocess error:", e)
-            return None
-
-    def get_embedding(self, face_bgr):
-        """Return normalized embedding vector using ArcFace (DeepFace 0.0.95)."""
-        try:
-            if face_bgr is None or face_bgr.size == 0:
-                return None
-
-            res = DeepFace.represent(
-            img_path=face_bgr,
-            model_name="ArcFace",
-            enforce_detection=False
-        )
-
-            if res and 'embedding' in res[0]:
-                emb = np.array(res[0]['embedding'], dtype='float32')
-                norm = np.linalg.norm(emb)
-                return emb / norm if norm > 0 else None
-            return None
+            cv2.imwrite(temp_file_path, face_image)
+            result = DeepFace.represent(
+                img_path=temp_file_path,
+                model_name='ArcFace',
+                enforce_detection=False,
+                detector_backend='skip'
+            )
+            
+            if result and 'embedding' in result[0]:
+                embedding_vector = np.array(result[0]['embedding'])
+                normalized_embedding = embedding_vector / np.linalg.norm(embedding_vector)
+                embedding = normalized_embedding
 
         except Exception as e:
-            print("Embedding extraction failed:", e)
-            traceback.print_exc()
-            return None
+            print(f"DeepFace Error in get_embedding: {e}")
+            embedding = None
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        # ----------------------------------------------------
+
+        if embedding is not None:
+            self.embedding_cache[image_hash] = embedding
+            if len(self.embedding_cache) > self.CACHE_SIZE:
+                self.embedding_cache.popitem(last=False)
+        
+        return embedding

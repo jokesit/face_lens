@@ -1,10 +1,24 @@
 # file: core/database.py (Final Version with Search)
 
-import sqlite3, numpy as np, io, os
+import sqlite3, numpy as np, io, os, sys
+
+
+# --- โค้ดเวทมนตร์สำหรับหา Path หลัก ---
+if getattr(sys, 'frozen', False):
+    application_path = os.path.dirname(sys.executable)
+else:
+    # __file__ คือ core/database.py, dirname 1 ครั้งได้ core, dirname 2 ครั้งได้ FACE_LENS
+    application_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ------------------------------------
 
 class Database:
     def __init__(self, db_path='data/facelens.db'):
-        db_dir = os.path.dirname(db_path)
+        # --- สร้าง Path ไปยังฐานข้อมูลแบบเต็มและปลอดภัย ---
+        db_dir = os.path.join(application_path, 'data')
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, 'facelens.db')
+        
+        
         os.makedirs(db_dir, exist_ok=True)
         sqlite3.register_adapter(np.ndarray, self.adapt_array)
         sqlite3.register_converter("array", self.convert_array)

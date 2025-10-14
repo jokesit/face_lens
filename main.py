@@ -1,7 +1,7 @@
 # file: main.py (The Final, Stable, Smooth & Correct Architecture)
 
 import sys, cv2, numpy as np
-from PySide6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton
+from PySide6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton, QSplashScreen
 from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap, QFont, QIcon
 
@@ -307,7 +307,25 @@ if __name__ == "__main__":
     app.setWindowIcon(QIcon("assets/logo.png"))
     app.setStyleSheet(STYLESHEET)
     app.setFont(QFont("Segoe UI", 10))
+    
+    # --- เริ่มส่วนของ Splash Screen ---
+    # 1. โหลดรูปภาพที่จะใช้เป็น Splash Screen
+    pixmap = QPixmap("assets/logo.png")
+    # 2. สร้าง Splash Screen จากรูปภาพ
+    splash = QSplashScreen(pixmap)
+    
+    splash.setWindowFlag(Qt.WindowStaysOnTopHint)
+    splash_font = QFont("Segoe UI", 20, QFont.Bold)
+    splash.setFont(splash_font)
+    splash.showMessage("Initializing FaceLens, please wait...", Qt.AlignCenter | Qt.AlignBottom, Qt.black)
+    # 3. แสดง Splash Screen ทันที!
+    splash.show()
+    
     window = MainWindow()
+    
+    # 4. เมื่อ MainWindow โหลดเสร็จแล้ว ให้ปิด Splash Screen
+    splash.finish(window)
+    # 5. แสดงหน้าต่างหลักของโปรแกรม
     window.show()
     sys.exit(app.exec())
     

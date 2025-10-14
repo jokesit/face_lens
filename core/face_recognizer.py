@@ -5,6 +5,20 @@ from deepface import DeepFace
 import os
 import hashlib
 from collections import OrderedDict
+import sys
+
+
+# --- โค้ดเวทมนตร์สำหรับหา Path หลัก ---
+if getattr(sys, 'frozen', False):
+    application_path = os.path.dirname(sys.executable)
+else:
+    application_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ------------------------------------
+
+# --- สร้าง Path ไปยังโฟลเดอร์ Temp ---
+temp_folder_path = os.path.join(application_path, 'temp_files')
+os.makedirs(temp_folder_path, exist_ok=True)
+# -----------------------------------
 
 class FaceRecognizer:
     def __init__(self):
@@ -43,7 +57,8 @@ class FaceRecognizer:
             return self.embedding_cache[image_hash]
         
         # --- ถ้าไม่เจอในแคช ให้ใช้วิธีไฟล์ชั่วคราวที่เสถียร ---
-        temp_file_path = f"temp_face_{image_hash}.jpg" # สร้างชื่อไฟล์ที่ไม่ซ้ำกัน
+        # temp_file_path = f"temp_face_{image_hash}.jpg" 
+        temp_file_path = os.path.join(temp_folder_path, f"temp_face_{image_hash}.jpg")
         embedding = None
         try:
             cv2.imwrite(temp_file_path, face_image)

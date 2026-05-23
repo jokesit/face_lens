@@ -7,6 +7,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
 from core.config import RECOGNITION_AMBIGUITY_MARGIN, RECOGNITION_THRESHOLD, RECOGNITION_TOP_K
+from core.confidence_profiles import DEFAULT_CONFIDENCE_PROFILE_KEY, get_confidence_profile
 from core.database import Database
 from core.face_recognizer import FaceRecognizer
 from core.recognition_types import FaceObservation, RecognitionResult
@@ -31,6 +32,8 @@ class RecognitionWorker(QObject):
         self.faiss_index = None
         self.index_to_name_map: dict[int, str] = {}
         self.recognition_threshold = RECOGNITION_THRESHOLD
+        self.ambiguity_margin = RECOGNITION_AMBIGUITY_MARGIN
+        self.confidence_profile_key = DEFAULT_CONFIDENCE_PROFILE_KEY
         self.top_k = max(1, RECOGNITION_TOP_K)
 
     @Slot()
@@ -124,10 +127,27 @@ class RecognitionWorker(QObject):
             # If two different customers are almost equally close, do not greet by name.
             if second_index >= 0 and second_name != best_name:
                 margin = second_distance - best_distance
-                if margin < RECOGNITION_AMBIGUITY_MARGIN:
+                if margin < self.ambiguity_margin:
                     return "Unknown", best_distance, "ambiguous-match"
 
         return best_name, best_distance, "ok"
+
+
+    @Slot(str)
+    def set_confidence_profile(self, profile_key: str) -> None:
+        """Apply recognition confidence settings at runtime.
+
+        Lower threshold means stricter matching. Larger ambiguity margin means the
+        app is more careful when two customers look similarly close.
+        """
+        profile = get_confidence_profile(profile_key)
+        self.confidence_profile_key = profile.key
+        self.recognition_threshold = float(profile.recognition_threshold)
+        self.ambiguity_margin = float(profile.ambiguity_margin)
+        print(
+            f"Confidence profile applied: {profile.thai_name} "
+            f"(threshold={self.recognition_threshold:.2f}, margin={self.ambiguity_margin:.2f})"
+        )
 
     @Slot(object)
     def process_snapshot_job(self, face_image) -> None:

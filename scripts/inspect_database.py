@@ -26,7 +26,9 @@ def main() -> None:
         print("FaceLens database summary")
         print(f"- active customers: {customers}")
         print(f"- active embeddings: {embeddings}")
+        size_mb = db.get_database_size_mb()
         print(f"- recognition events: {events}")
+        print(f"- database size: {size_mb:.2f} MB")
     finally:
         db.close()
 

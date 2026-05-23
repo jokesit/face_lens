@@ -10,15 +10,15 @@ from pathlib import Path
 
 import numpy as np
 
-from core.config import DB_PATH
+from core.config import DB_PATH, RECOGNITION_EVENTS_RETENTION_DAYS, STANDALONE_WARN_EMBEDDINGS
 
 
 class Database:
     """SQLite persistence layer for FaceLens.
 
     Batch 4 upgraded the storage model from one averaged embedding per customer
-    to production-friendly tables. Batch 5 adds management helpers for a Thai
-    customer-management UI: listing customers, soft delete, rename, and notes.
+    to production-friendly tables. Batch 10 adds maintenance, backup restore,
+    and privacy-delete helpers for standalone pharmacy deployments.
     """
 
     def __init__(self, db_path: str | Path = DB_PATH):
@@ -108,8 +108,11 @@ class Database:
             )
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_face_embeddings_customer_id ON face_embeddings(customer_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_face_embeddings_active ON face_embeddings(is_active)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_face_embeddings_active_customer ON face_embeddings(is_active, customer_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_customers_active_name ON customers(deleted_at, consent_status, name)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recognition_events_created_at ON recognition_events(created_at)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recognition_events_customer_id ON recognition_events(customer_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recognition_events_type_created ON recognition_events(result_type, created_at)")
 
             now = self._utc_now()
             self.conn.execute(
@@ -238,6 +241,8 @@ class Database:
             "active_customers": int(active_customers),
             "active_embeddings": int(active_embeddings),
             "recognition_events": int(events),
+            "database_size_mb": self.get_database_size_mb(),
+            "scale_warning": int(active_embeddings) >= STANDALONE_WARN_EMBEDDINGS,
         }
 
     def add_or_update_customer(self, name: str, new_embeddings: list[np.ndarray]) -> None:
@@ -435,6 +440,90 @@ class Database:
             self.conn.execute("UPDATE face_embeddings SET is_active = 0 WHERE customer_id = ?", (customer_id,))
             self.conn.commit()
             return True
+
+
+    def hard_delete_customer_by_id(self, customer_id: int) -> bool:
+        """Permanently remove a customer's biometric data and direct event history.
+
+        Use this when a customer asks the shop to delete their face data. This is
+        intentionally separate from soft_delete_customer_by_id(), which only hides
+        a customer from recognition.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id FROM customers WHERE id = ?",
+                (customer_id,),
+            ).fetchone()
+            if not row:
+                return False
+            self.conn.execute("DELETE FROM face_embeddings WHERE customer_id = ?", (customer_id,))
+            self.conn.execute("DELETE FROM recognition_events WHERE customer_id = ?", (customer_id,))
+            self.conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+            self.conn.commit()
+            return True
+
+    def prune_recognition_events(self, retention_days: int = RECOGNITION_EVENTS_RETENTION_DAYS) -> int:
+        """Delete old recognition events and return the number of removed rows."""
+        retention_days = max(1, int(retention_days))
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM recognition_events
+                WHERE datetime(created_at) < datetime('now', ?)
+                """,
+                (f"-{retention_days} days",),
+            )
+            removed = int(cursor.rowcount if cursor.rowcount is not None else 0)
+            self.conn.commit()
+            return removed
+
+    def optimize_database(self) -> None:
+        """Checkpoint WAL, refresh SQLite statistics, and compact the DB file."""
+        with self._lock:
+            self.conn.commit()
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("ANALYZE")
+            self.conn.commit()
+            self.conn.execute("VACUUM")
+            self.conn.commit()
+
+    def get_database_size_mb(self) -> float:
+        total_bytes = 0
+        for path in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+            if path.exists():
+                total_bytes += path.stat().st_size
+        return round(total_bytes / (1024 * 1024), 2)
+
+    def restore_from_backup(self, source: str | Path) -> Path:
+        """Restore this database connection from a SQLite .db backup file."""
+        source_path = Path(source)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Backup file not found: {source_path}")
+        with self._lock:
+            self.conn.commit()
+            with sqlite3.connect(str(source_path), detect_types=sqlite3.PARSE_DECLTYPES) as source_conn:
+                required = {"customers", "face_embeddings", "recognition_events"}
+                tables = {
+                    row[0]
+                    for row in source_conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                }
+                missing = required - tables
+                if missing:
+                    raise ValueError("ไฟล์สำรองนี้ไม่ใช่ฐานข้อมูล FaceLens ที่ถูกต้อง")
+                source_conn.backup(self.conn)
+            self._configure_connection()
+            self.create_tables()
+            self.conn.commit()
+        return source_path
+
+    def backup_to(self, destination: str | Path) -> Path:
+        """Create a consistent SQLite backup, including WAL changes."""
+        destination_path = Path(destination)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with sqlite3.connect(str(destination_path)) as backup_conn:
+                self.conn.backup(backup_conn)
+        return destination_path
 
     def close(self) -> None:
         conn = getattr(self, "conn", None)

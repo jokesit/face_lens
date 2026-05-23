@@ -31,23 +31,32 @@ TEMP_DIR = APP_PATH / "temp_files"
 ASSETS_DIR = APP_PATH / "assets"
 DB_PATH = DATA_DIR / "facelens.db"
 LOG_DIR = APP_PATH / "logs"
+BACKUP_DIR = APP_PATH / "backups"
 
-for folder in (DATA_DIR, TEMP_DIR, LOG_DIR):
+for folder in (DATA_DIR, TEMP_DIR, LOG_DIR, BACKUP_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 # Camera/display
 CAMERA_INDEX = int(os.getenv("FACELENS_CAMERA_INDEX", "0"))
 CAMERA_WIDTH = int(os.getenv("FACELENS_CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.getenv("FACELENS_CAMERA_HEIGHT", "480"))
-DISPLAY_WIDTH = 640
-DISPLAY_HEIGHT = 480
+DISPLAY_WIDTH = int(os.getenv("FACELENS_DISPLAY_WIDTH", "640"))
+DISPLAY_HEIGHT = int(os.getenv("FACELENS_DISPLAY_HEIGHT", "430"))
+APP_WINDOW_WIDTH = int(os.getenv("FACELENS_WINDOW_WIDTH", "860"))
+APP_WINDOW_HEIGHT = int(os.getenv("FACELENS_WINDOW_HEIGHT", "700"))
 TARGET_FPS = float(os.getenv("FACELENS_TARGET_FPS", "15"))
+FACE_DETECTION_INTERVAL_FRAMES = max(1, int(os.getenv("FACELENS_FACE_DETECTION_INTERVAL", "1")))
+# Batch 7 adds runtime performance profiles. Environment values above are kept
+# as safe defaults/fallbacks, while the UI can change the active profile live.
 SHOW_DEBUG_DISTANCE = env_bool("FACELENS_SHOW_DEBUG_DISTANCE", False)
 
 # Face detection / recognition
 FACE_DETECTION_CONFIDENCE = float(os.getenv("FACELENS_FACE_CONFIDENCE", "0.70"))
 MIN_FACE_SIZE = int(os.getenv("FACELENS_MIN_FACE_SIZE", "80"))
 RECOGNITION_INTERVAL_FRAMES = int(os.getenv("FACELENS_RECOGNITION_INTERVAL", "12"))
+RECOGNITION_MIN_SECONDS_BETWEEN_JOBS = float(os.getenv("FACELENS_RECOGNITION_MIN_SECONDS", "1.2"))
+RECOGNITION_RESULT_TTL_SECONDS = float(os.getenv("FACELENS_RECOGNITION_RESULT_TTL", "3.0"))
+RECOGNITION_BOX_REUSE_IOU = float(os.getenv("FACELENS_RECOGNITION_REUSE_IOU", "0.35"))
 RECOGNITION_THRESHOLD = float(os.getenv("FACELENS_RECOGNITION_THRESHOLD", "0.75"))
 VERIFICATION_THRESHOLD = float(os.getenv("FACELENS_VERIFICATION_THRESHOLD", "0.75"))
 RECOGNITION_TOP_K = int(os.getenv("FACELENS_RECOGNITION_TOP_K", "2"))
@@ -73,3 +82,12 @@ EMBEDDING_CACHE_SIZE = int(os.getenv("FACELENS_EMBEDDING_CACHE_SIZE", "300"))
 
 # Recognition event logging
 RECOGNITION_EVENT_MIN_SECONDS = float(os.getenv("FACELENS_EVENT_MIN_SECONDS", "15"))
+
+# Standalone pharmacy target scale.
+# 1,000-5,000 customers is suitable for local SQLite + in-memory FAISS.
+STANDALONE_TARGET_CUSTOMERS = int(os.getenv("FACELENS_TARGET_CUSTOMERS", "5000"))
+STANDALONE_WARN_EMBEDDINGS = int(os.getenv("FACELENS_WARN_EMBEDDINGS", "30000"))
+RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER = int(os.getenv("FACELENS_MAX_EMBEDDINGS_PER_CUSTOMER", "8"))
+
+# Keep event logs useful without allowing the SQLite file to grow forever.
+RECOGNITION_EVENTS_RETENTION_DAYS = int(os.getenv("FACELENS_EVENT_RETENTION_DAYS", "90"))

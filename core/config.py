@@ -1,4 +1,3 @@
-# file: core/config.py
 """Central configuration for FaceLens.
 
 Keep performance knobs and filesystem paths in one place so the app can be
@@ -19,6 +18,13 @@ def get_app_path() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 APP_PATH = get_app_path()
 DATA_DIR = APP_PATH / "data"
 TEMP_DIR = APP_PATH / "temp_files"
@@ -36,6 +42,7 @@ CAMERA_HEIGHT = int(os.getenv("FACELENS_CAMERA_HEIGHT", "480"))
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 TARGET_FPS = float(os.getenv("FACELENS_TARGET_FPS", "15"))
+SHOW_DEBUG_DISTANCE = env_bool("FACELENS_SHOW_DEBUG_DISTANCE", False)
 
 # Face detection / recognition
 FACE_DETECTION_CONFIDENCE = float(os.getenv("FACELENS_FACE_CONFIDENCE", "0.70"))
@@ -43,6 +50,18 @@ MIN_FACE_SIZE = int(os.getenv("FACELENS_MIN_FACE_SIZE", "80"))
 RECOGNITION_INTERVAL_FRAMES = int(os.getenv("FACELENS_RECOGNITION_INTERVAL", "12"))
 RECOGNITION_THRESHOLD = float(os.getenv("FACELENS_RECOGNITION_THRESHOLD", "0.75"))
 VERIFICATION_THRESHOLD = float(os.getenv("FACELENS_VERIFICATION_THRESHOLD", "0.75"))
+RECOGNITION_TOP_K = int(os.getenv("FACELENS_RECOGNITION_TOP_K", "2"))
+RECOGNITION_AMBIGUITY_MARGIN = float(os.getenv("FACELENS_RECOGNITION_AMBIGUITY_MARGIN", "0.08"))
+MAX_RECOGNITION_FACES = int(os.getenv("FACELENS_MAX_RECOGNITION_FACES", "3"))
+
+# Face quality. These values are intentionally conservative for shop PCs and
+# normal webcams. They can be tuned through environment variables later.
+FACE_QUALITY_MIN_SIZE = int(os.getenv("FACELENS_QUALITY_MIN_SIZE", "80"))
+FACE_QUALITY_MIN_SHARPNESS = float(os.getenv("FACELENS_QUALITY_MIN_SHARPNESS", "25"))
+FACE_QUALITY_MIN_BRIGHTNESS = float(os.getenv("FACELENS_QUALITY_MIN_BRIGHTNESS", "45"))
+FACE_QUALITY_MAX_BRIGHTNESS = float(os.getenv("FACELENS_QUALITY_MAX_BRIGHTNESS", "220"))
+FACE_QUALITY_MIN_SCORE_RECOGNITION = float(os.getenv("FACELENS_QUALITY_MIN_SCORE_RECOGNITION", "45"))
+FACE_QUALITY_MIN_SCORE_CAPTURE = float(os.getenv("FACELENS_QUALITY_MIN_SCORE_CAPTURE", "60"))
 
 # Enrollment
 MAX_SNAPSHOTS = int(os.getenv("FACELENS_MAX_SNAPSHOTS", "5"))
@@ -51,3 +70,6 @@ MIN_FACE_MOVEMENT = int(os.getenv("FACELENS_MIN_FACE_MOVEMENT", "10"))
 
 # Embedding cache
 EMBEDDING_CACHE_SIZE = int(os.getenv("FACELENS_EMBEDDING_CACHE_SIZE", "300"))
+
+# Recognition event logging
+RECOGNITION_EVENT_MIN_SECONDS = float(os.getenv("FACELENS_EVENT_MIN_SECONDS", "15"))

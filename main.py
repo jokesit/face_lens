@@ -1,371 +1,107 @@
-# file: main.py
 """FaceLens main application.
 
-Batch 2 focuses on correct Qt threading:
-- VideoThread owns only camera capture, face detection, and display frame creation.
-- RecognitionWorker is a QObject moved to a dedicated QThread for DeepFace/FAISS work.
-- Heavy embedding jobs no longer live on a QThread subclass object in the GUI thread.
+Batch 5 focuses on production UI polish:
+- Thai operator-facing messages.
+- Customer management dialog.
+- Debug-distance toggle so the customer-facing screen stays clean.
 """
 
 from __future__ import annotations
 
 import ctypes
-import platform
 import sys
 import time
-import traceback
 
-import cv2
-import faiss
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QFont, QIcon, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QPushButton, QSplashScreen, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSplashScreen,
+    QVBoxLayout,
+    QWidget,
+)
 
 from add_customer_dialog import AddCustomerDialog
-from core.config import (
-    ASSETS_DIR,
-    CAMERA_HEIGHT,
-    CAMERA_INDEX,
-    CAMERA_WIDTH,
-    CAPTURE_COOLDOWN_FRAMES,
-    DISPLAY_HEIGHT,
-    DISPLAY_WIDTH,
-    LOG_DIR,
-    MAX_SNAPSHOTS,
-    MIN_FACE_MOVEMENT,
-    RECOGNITION_INTERVAL_FRAMES,
-    RECOGNITION_THRESHOLD,
-    TARGET_FPS,
-)
+from customer_management_dialog import CustomerManagementDialog
+from core.app_logging import install_exception_logger
+from core.config import ASSETS_DIR, DISPLAY_HEIGHT, DISPLAY_WIDTH, RECOGNITION_EVENT_MIN_SECONDS, SHOW_DEBUG_DISTANCE
 from core.database import Database
-from core.face_recognizer import FaceRecognizer
+from core.recognition_worker import RecognitionWorker
+from core.ui_styles import STYLESHEET
+from core.video_thread import VideoThread
 
 
-# Windows taskbar icon/app grouping.
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("facelens.pro.store.1.0")
 except (ImportError, AttributeError):
     pass
 
 
-STYLESHEET = """
-QMainWindow { background-color: #F5F5F5; }
-QLabel#TitleLabel { font-size: 32px; font-weight: bold; color: #2980B9; padding-bottom: 10px; }
-QLabel#CameraLabel { background-color: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 10px; }
-QLabel#NameLabel { font-size: 24px; font-weight: bold; padding: 10px; border-radius: 5px; }
-QPushButton { background-color: #3498DB; color: white; font-size: 16px; font-weight: bold; padding: 12px; border-radius: 8px; border: none; }
-QPushButton:hover { background-color: #2980B9; }
-QPushButton:pressed { background-color: #1F618D; }
-"""
-
-
-class RecognitionWorker(QObject):
-    """Runs expensive recognition jobs inside a dedicated QThread.
-
-    Important Qt rule: this is a QObject moved to a QThread. Slots on this object
-    run in the worker thread when called through queued signal connections.
-    """
-
-    recognition_result = Signal(str, object)
-    snapshot_result = Signal(object)
-    verification_result = Signal(str, float)
-    worker_ready = Signal(str)
-    worker_error = Signal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.recognizer: FaceRecognizer | None = None
-        self.faiss_index = None
-        self.index_to_name_map: dict[int, str] = {}
-        self.recognition_threshold = RECOGNITION_THRESHOLD
-
-    @Slot()
-    def initialize(self) -> None:
-        """Load and warm up DeepFace in the recognition worker thread."""
-        try:
-            print("RecognitionWorker initializing...")
-            self.recognizer = FaceRecognizer()
-            print("Warming up model...")
-            self.recognizer.get_embedding(np.zeros((160, 160, 3), dtype=np.uint8))
-            print("Model ready.")
-            self.worker_ready.emit("Searching...")
-        except Exception as exc:
-            message = f"Recognition initialization failed: {exc}"
-            print(message)
-            self.worker_error.emit(message)
-
-    @Slot(list)
-    def build_faiss_index(self, db_data: list[tuple[int, str, np.ndarray]]) -> None:
-        try:
-            if not db_data:
-                self.faiss_index = None
-                self.index_to_name_map = {}
-                print("FAISS index cleared: no customers in database.")
-                return
-
-            embeddings = np.asarray([item[2] for item in db_data], dtype=np.float32)
-            if embeddings.ndim != 2 or embeddings.shape[0] == 0:
-                self.faiss_index = None
-                self.index_to_name_map = {}
-                return
-
-            index = faiss.IndexFlatL2(embeddings.shape[1])
-            index.add(embeddings)
-            self.faiss_index = index
-            self.index_to_name_map = {i: item[1] for i, item in enumerate(db_data)}
-            print(f"FAISS index rebuilt: {len(self.index_to_name_map)} customer vectors.")
-        except Exception as exc:
-            message = f"FAISS index build failed: {exc}"
-            print(message)
-            self.worker_error.emit(message)
-
-    @Slot(object, object)
-    def process_recognition_job(self, face_image, box) -> None:
-        try:
-            if self.faiss_index is None or self.recognizer is None:
-                self.recognition_result.emit("Unknown", box)
-                return
-
-            embedding = self.recognizer.get_embedding(face_image)
-            if embedding is None:
-                self.recognition_result.emit("Unknown", box)
-                return
-
-            query = np.asarray([embedding], dtype=np.float32)
-            distances, indices = self.faiss_index.search(query, 1)
-            distance = float(distances[0][0])
-            index = int(indices[0][0])
-
-            name = "Unknown"
-            if distance < self.recognition_threshold:
-                name = self.index_to_name_map.get(index, "Unknown")
-            self.recognition_result.emit(name, box)
-        except Exception as exc:
-            print(f"Recognition job failed: {exc}")
-            self.recognition_result.emit("Unknown", box)
-
-    @Slot(object)
-    def process_snapshot_job(self, face_image) -> None:
-        try:
-            if self.recognizer is None:
-                self.snapshot_result.emit(None)
-                return
-            embedding = self.recognizer.get_embedding(face_image)
-            self.snapshot_result.emit(embedding)
-        except Exception as exc:
-            print(f"Snapshot embedding failed: {exc}")
-            self.snapshot_result.emit(None)
-
-    @Slot(list, str)
-    def process_verification_job(self, captured_embeddings: list[np.ndarray], name: str) -> None:
-        try:
-            valid_embeddings = [np.asarray(e, dtype=np.float32) for e in captured_embeddings if e is not None]
-            if not valid_embeddings:
-                self.verification_result.emit(name, -1.0)
-                return
-
-            new_avg = np.mean(valid_embeddings, axis=0).astype(np.float32)
-            norm = np.linalg.norm(new_avg)
-            if norm == 0:
-                self.verification_result.emit(name, -1.0)
-                return
-            new_avg = new_avg / norm
-
-            db = Database()
-            try:
-                existing = db.get_customer_by_name(name)
-            finally:
-                db.close()
-
-            distance = -1.0
-            if existing and isinstance(existing.get("avg_embedding"), np.ndarray):
-                distance = float(np.linalg.norm(new_avg - existing["avg_embedding"]))
-            self.verification_result.emit(name, distance)
-        except Exception as exc:
-            print(f"Verification job failed: {exc}")
-            self.verification_result.emit(name, -1.0)
-
-
-class VideoThread(QThread):
-    """Camera capture + face detection thread.
-
-    This thread emits QImage, not QPixmap. QPixmap must be created in the GUI thread.
-    """
-
-    change_image_signal = Signal(QImage)
-    recognition_job_signal = Signal(object, object)
-    raw_frame_signal = Signal(np.ndarray)
-    capture_progress_signal = Signal(int, int)
-    snapshot_job_signal = Signal(object)
-    update_display_name_signal = Signal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.detector = FaceRecognizer()
-        self.is_running = True
-        self.frame_counter = 0
-        self.recognition_job_pending = False
-        self.last_known_results: dict[tuple[int, int, int, int], str] = {}
-        self.is_capture_mode = False
-        self.capture_count = 0
-        self.last_face_box = None
-        self.capture_cooldown = 0
-
-        try:
-            self.font = ImageFont.truetype(str(ASSETS_DIR / "tahoma.ttf"), 24)
-        except IOError:
-            print("Font file not found in assets/tahoma.ttf. Using default font.")
-            self.font = ImageFont.load_default()
-
-    @Slot(str, object)
-    def update_recognition_results(self, name: str, box) -> None:
-        self.recognition_job_pending = False
-        if box is not None:
-            self.last_known_results[box] = name
-
-    @Slot(bool)
-    def set_capture_mode(self, is_active: bool) -> None:
-        self.is_capture_mode = is_active
-        self.capture_count = 0 if is_active else self.capture_count
-        self.last_face_box = None
-        self.capture_cooldown = 0
-        if is_active:
-            self.recognition_job_pending = False
-            self.last_known_results = {}
-
-    def run(self) -> None:
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else 0
-        cap = cv2.VideoCapture(CAMERA_INDEX, backend)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if not cap.isOpened():
-            self.update_display_name_signal.emit("Camera Error")
-            return
-
-        min_frame_seconds = 1.0 / TARGET_FPS if TARGET_FPS > 0 else 0.0
-        try:
-            while self.is_running:
-                frame_started_at = time.perf_counter()
-                ret, cv_img = cap.read()
-                if not ret:
-                    self.msleep(30)
-                    continue
-
-                self.raw_frame_signal.emit(cv_img)
-                frame_to_display = cv_img.copy()
-                faces, boxes = self.detector.detect_faces(frame_to_display)
-
-                if self.is_capture_mode:
-                    self._handle_capture_mode(faces, boxes)
-                else:
-                    self._handle_recognition_mode(faces, boxes)
-
-                self._emit_display_frame(frame_to_display)
-
-                self.frame_counter += 1
-                elapsed = time.perf_counter() - frame_started_at
-                sleep_ms = int(max(0.0, min_frame_seconds - elapsed) * 1000)
-                if sleep_ms > 0:
-                    self.msleep(sleep_ms)
-        finally:
-            cap.release()
-
-    def _handle_capture_mode(self, faces, boxes) -> None:
-        if self.capture_cooldown > 0:
-            self.capture_cooldown -= 1
-
-        if self.capture_cooldown != 0 or len(faces) != 1 or self.capture_count >= MAX_SNAPSHOTS:
-            return
-
-        face_img, face_box = faces[0], boxes[0]
-        face_h, face_w = face_img.shape[:2]
-        is_good = face_h >= 64 and face_w >= 64
-        has_moved = True
-
-        if self.last_face_box is not None:
-            dx = abs(face_box[0] - self.last_face_box[0])
-            dy = abs(face_box[1] - self.last_face_box[1])
-            has_moved = dx >= MIN_FACE_MOVEMENT or dy >= MIN_FACE_MOVEMENT
-
-        if is_good and has_moved:
-            self.snapshot_job_signal.emit(face_img)
-            self.capture_count += 1
-            self.last_face_box = face_box
-            self.capture_cooldown = CAPTURE_COOLDOWN_FRAMES
-            self.capture_progress_signal.emit(self.capture_count, MAX_SNAPSHOTS)
-
-    def _handle_recognition_mode(self, faces, boxes) -> None:
-        if self.frame_counter % RECOGNITION_INTERVAL_FRAMES != 0:
-            return
-
-        self.last_known_results = {}
-        if faces and not self.recognition_job_pending:
-            self.recognition_job_pending = True
-            self.recognition_job_signal.emit(faces[0], boxes[0])
-        elif not faces:
-            self.recognition_job_pending = False
-            self.update_display_name_signal.emit("Unknown")
-
-    def _emit_display_frame(self, frame_to_display: np.ndarray) -> None:
-        if self.last_known_results:
-            pil_img = Image.fromarray(cv2.cvtColor(frame_to_display, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil_img)
-            for box, name in self.last_known_results.items():
-                x, y, w, h = box
-                color = (0, 255, 0) if name != "Unknown" else (255, 0, 0)
-                draw.rectangle([(x, y), (x + w, y + h)], outline=color, width=3)
-                draw.text((x, max(0, y - 30)), name, font=self.font, fill=color)
-            frame_to_display = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-        rgb = cv2.cvtColor(frame_to_display, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        q_img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
-        self.change_image_signal.emit(q_img)
-
-    def stop(self) -> None:
-        self.is_running = False
-        self.quit()
-        self.wait(3000)
-
-
 class MainWindow(QMainWindow):
     rebuild_index_signal = Signal(list)
     verification_job_signal = Signal(list, str)
+    debug_distance_toggled = Signal(bool)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FaceLens (Professional Thread Architecture)")
-        self.setGeometry(100, 100, 800, 720)
+        self.setWindowTitle("FaceLens - ระบบจดจำใบหน้าสำหรับร้านค้า")
+        self.setGeometry(100, 100, 860, 780)
         self.setWindowIcon(QIcon(str(ASSETS_DIR / "logo.png")))
         self.db = Database()
+        self._last_recognition_event_by_key: dict[str, float] = {}
 
         title_label = QLabel("FaceLens AI")
         title_label.setObjectName("TitleLabel")
         title_label.setAlignment(Qt.AlignCenter)
 
+        subtitle_label = QLabel("ระบบช่วยจดจำลูกค้า เพื่อให้พนักงานทักทายได้อย่างถูกต้องและประทับใจ")
+        subtitle_label.setObjectName("SubtitleLabel")
+        subtitle_label.setAlignment(Qt.AlignCenter)
+        subtitle_label.setWordWrap(True)
+
         self.image_label = QLabel(self)
         self.image_label.setObjectName("CameraLabel")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setText("Starting Camera...")
+        self.image_label.setText("กำลังเปิดกล้อง...")
 
         self.name_label = QLabel(self)
         self.name_label.setObjectName("NameLabel")
         self.name_label.setAlignment(Qt.AlignCenter)
 
-        self.add_customer_button = QPushButton("Add / Update Customer Data", self)
+        self.status_label = QLabel("สถานะ: กำลังเริ่มต้นระบบ")
+        self.status_label.setObjectName("StatusLabel")
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        self.add_customer_button = QPushButton("เพิ่ม / อัปเดตข้อมูลลูกค้า", self)
         self.add_customer_button.clicked.connect(self.open_add_customer_dialog)
+
+        self.manage_customer_button = QPushButton("จัดการข้อมูลลูกค้า", self)
+        self.manage_customer_button.clicked.connect(self.open_customer_management_dialog)
+
+        self.debug_distance_checkbox = QCheckBox("โหมดตรวจสอบ: แสดงค่าความใกล้เคียง")
+        self.debug_distance_checkbox.setToolTip("ใช้สำหรับทดสอบและปรับ threshold เท่านั้น ไม่แนะนำให้เปิดตอนใช้งานหน้าร้าน")
+        self.debug_distance_checkbox.setChecked(SHOW_DEBUG_DISTANCE)
+        self.debug_distance_checkbox.toggled.connect(self.debug_distance_toggled.emit)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.add_customer_button)
+        button_layout.addWidget(self.manage_customer_button)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
+        layout.setSpacing(14)
         layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
         layout.addWidget(self.image_label)
         layout.addWidget(self.name_label)
-        layout.addWidget(self.add_customer_button)
+        layout.addWidget(self.status_label)
+        layout.addLayout(button_layout)
+        layout.addWidget(self.debug_distance_checkbox, alignment=Qt.AlignCenter)
 
         container = QWidget()
         container.setLayout(layout)
@@ -387,24 +123,26 @@ class MainWindow(QMainWindow):
         self.video_thread.recognition_job_signal.connect(self.recognition_worker.process_recognition_job)
         self.video_thread.update_display_name_signal.connect(self.update_name_from_result)
 
-        self.recognition_worker.recognition_result.connect(self.video_thread.update_recognition_results)
-        self.recognition_worker.recognition_result.connect(self.update_name_from_result)
+        self.recognition_worker.recognition_results.connect(self.video_thread.update_recognition_results)
+        self.recognition_worker.recognition_results.connect(self.log_recognition_events)
         self.recognition_worker.worker_ready.connect(self.update_name_from_result)
         self.recognition_worker.worker_error.connect(self.show_worker_error)
 
+        self.debug_distance_toggled.connect(self.video_thread.set_show_debug_distance)
         self.rebuild_index_signal.connect(self.recognition_worker.build_faiss_index)
         self.verification_job_signal.connect(self.recognition_worker.process_verification_job)
 
     def _start_threads(self) -> None:
-        self.update_name_from_result("Loading AI model...", None)
+        self.update_name_from_result("Loading AI model...")
         self.recognition_thread.start()
         self.video_thread.start()
-        self.rebuild_index_signal.emit(self.db.get_all_data_for_faiss())
+        self.rebuild_faiss_index()
 
     def open_add_customer_dialog(self) -> None:
         dialog = AddCustomerDialog(parent=self)
 
         self.video_thread.raw_frame_signal.connect(dialog.update_frame)
+        self.video_thread.capture_hint_signal.connect(dialog.update_capture_hint)
         dialog.capture_mode_toggled.connect(self.video_thread.set_capture_mode)
         self.video_thread.snapshot_job_signal.connect(self.recognition_worker.process_snapshot_job)
         self.recognition_worker.snapshot_result.connect(dialog.add_captured_embedding)
@@ -416,6 +154,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
         self.video_thread.raw_frame_signal.disconnect(dialog.update_frame)
+        self.video_thread.capture_hint_signal.disconnect(dialog.update_capture_hint)
         dialog.capture_mode_toggled.disconnect(self.video_thread.set_capture_mode)
         self.video_thread.snapshot_job_signal.disconnect(self.recognition_worker.process_snapshot_job)
         self.recognition_worker.snapshot_result.disconnect(dialog.add_captured_embedding)
@@ -425,9 +164,47 @@ class MainWindow(QMainWindow):
         dialog.customer_saved_signal.disconnect(self.on_customer_saved)
         self.video_thread.set_capture_mode(False)
 
+    def open_customer_management_dialog(self) -> None:
+        dialog = CustomerManagementDialog(parent=self)
+        dialog.customers_changed.connect(self.on_customer_saved)
+        dialog.exec()
+        dialog.customers_changed.disconnect(self.on_customer_saved)
+
+    def rebuild_faiss_index(self) -> None:
+        db_data = self.db.get_all_data_for_faiss()
+        print(f"Rebuilding FAISS from {len(db_data)} active face embeddings.")
+        self.status_label.setText(f"สถานะ: พร้อมใช้งานฐานข้อมูลใบหน้า {len(db_data)} รายการ")
+        self.rebuild_index_signal.emit(db_data)
+
     @Slot()
     def on_customer_saved(self) -> None:
-        self.rebuild_index_signal.emit(self.db.get_all_data_for_faiss())
+        self.rebuild_faiss_index()
+
+    @Slot(list)
+    def log_recognition_events(self, results: list) -> None:
+        """Persist throttled recognition events for audit/debugging."""
+        now = time.monotonic()
+        for name, _box, distance, _quality_score, note in results:
+            if name != "Unknown" and note == "ok":
+                result_type = "recognized"
+                event_key = f"recognized:{name}"
+                predicted_name = name
+            elif note == "ambiguous-match":
+                result_type = "ambiguous"
+                event_key = "ambiguous"
+                predicted_name = None
+            else:
+                continue
+
+            last_at = self._last_recognition_event_by_key.get(event_key, 0.0)
+            if now - last_at < RECOGNITION_EVENT_MIN_SECONDS:
+                continue
+
+            self._last_recognition_event_by_key[event_key] = now
+            try:
+                self.db.log_recognition_event(predicted_name, distance, result_type, note)
+            except Exception as exc:
+                print(f"Could not log recognition event: {exc}")
 
     def closeEvent(self, event) -> None:
         self.video_thread.stop()
@@ -443,44 +220,34 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def show_worker_error(self, message: str) -> None:
-        self.update_name_from_result("Unknown", None)
+        self.update_name_from_result("Unknown")
+        self.status_label.setText("สถานะ: เกิดข้อผิดพลาดจาก AI model กรุณาดู logs/facelens_crash.log")
         print(message)
 
-    @Slot(str, object)
-    def update_name_from_result(self, name: str, box=None) -> None:
+    @Slot(str)
+    def update_name_from_result(self, name: str) -> None:
         if name == "Camera Error":
-            text, color, bg_color = "Camera Error", "#E74C3C", "#F9EBEA"
-        elif name in {"Loading AI model...", "Searching..."}:
-            text, color, bg_color = name, "#2980B9", "#EBF5FB"
+            text, color, bg_color = "ไม่สามารถเปิดกล้องได้", "#E74C3C", "#F9EBEA"
+            status = "สถานะ: ตรวจสอบการเชื่อมต่อกล้อง หรือปิดโปรแกรมอื่นที่ใช้กล้องอยู่"
+        elif name == "Loading AI model...":
+            text, color, bg_color = "กำลังโหลด AI...", "#2980B9", "#EBF5FB"
+            status = "สถานะ: กำลังเตรียมระบบจดจำใบหน้า ครั้งแรกอาจใช้เวลานานเล็กน้อย"
+        elif name == "Searching...":
+            text, color, bg_color = "พร้อมจดจำใบหน้า", "#2980B9", "#EBF5FB"
+            status = "สถานะ: ระบบพร้อมใช้งาน"
         elif name != "Unknown":
-            text, color, bg_color = f"Welcome, {name}!", "#2ECC71", "#E8F8F5"
+            text, color, bg_color = f"สวัสดีคุณ {name}", "#2ECC71", "#E8F8F5"
+            status = "สถานะ: พบลูกค้าที่บันทึกไว้แล้ว"
         else:
-            text, color, bg_color = "Unknown Customer", "#E74C3C", "#F9EBEA"
+            text, color, bg_color = "ยังไม่พบข้อมูลลูกค้า", "#E67E22", "#FEF5E7"
+            status = "สถานะ: กำลังตรวจสอบใบหน้าในกล้อง"
 
         self.name_label.setStyleSheet(
             f"background-color: {bg_color}; color: {color}; font-size: 24px; "
-            "font-weight: bold; padding: 10px; border-radius: 5px;"
+            "font-weight: bold; padding: 12px; border-radius: 8px;"
         )
         self.name_label.setText(text)
-
-
-def install_exception_logger() -> None:
-    """Write uncaught Python exceptions to logs/facelens_crash.log."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / "facelens_crash.log"
-
-    def _hook(exc_type, exc_value, exc_tb):
-        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        try:
-            with open(log_path, "a", encoding="utf-8") as file:
-                file.write("\n" + "=" * 80 + "\n")
-                file.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
-                file.write(text)
-        finally:
-            print(text)
-            sys.__excepthook__(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = _hook
+        self.status_label.setText(status)
 
 
 if __name__ == "__main__":
@@ -494,7 +261,7 @@ if __name__ == "__main__":
     splash = QSplashScreen(pixmap)
     splash.setWindowFlag(Qt.WindowStaysOnTopHint)
     splash.setFont(QFont("Segoe UI", 20, QFont.Bold))
-    splash.showMessage("Initializing FaceLens, please wait...", Qt.AlignCenter | Qt.AlignBottom, Qt.black)
+    splash.showMessage("กำลังเริ่มต้น FaceLens...", Qt.AlignCenter | Qt.AlignBottom, Qt.black)
     splash.show()
 
     window = MainWindow()

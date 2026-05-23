@@ -1,0 +1,5 @@
+FaceLens installed mode marker.
+
+When this file exists beside FaceLens.exe, FaceLens stores writable runtime data
+under C:\ProgramData\FaceLens instead of the application installation folder.
+Do not delete this file from installed releases.

@@ -1,12 +1,20 @@
-# 1. Virtual Environment
+# =========================================================
+# FaceLens .gitignore
+# Keep source code, docs, installer scripts, and specs.
+# Ignore local runtime data, build outputs, secrets, and heavy generated files.
+# =========================================================
+
+# 1. Virtual environments
 venv/
 .venv/
+env/
+ENV/
 
 # 2. Local configuration / secrets
-config.ini
 .env
 .env.*
 !.env.example
+config.ini
 *.key
 *.pem
 *.p12
@@ -16,55 +24,83 @@ config.ini
 private_keys/
 license_private_key*
 
-# 3. Python Cache
+# 3. Python cache
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# 4. PyInstaller Build Artifacts
+# 4. IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 5. PyInstaller build artifacts
 build/
 dist/
 
-# IMPORTANT:
-# Do NOT ignore *.spec because main.spec is production release source.
-# *.spec
+# Keep PyInstaller spec files because they are release source.
+!*.spec
 
-# 5. Inno Setup Build Artifacts
+# 6. Release output artifacts
+release/
 Output/
 
-# Ignore generated installer output files
+# Generated installers / binaries should not be committed.
 *.exe
+*.msi
 
-# But allow release/build source scripts if needed
-!main.spec
-!dpos_installer.iss
+# 7. Runtime app data
+data/
+logs/
+backups/
+temp_files/
+.deepface/
 
-# If you keep installer source files inside DPOS_Installer,
-# do not ignore the whole folder. Ignore only generated subfolders/files.
-DPOS_Installer/DPOS/
-DPOS_Installer/Output/
-DPOS_Installer/*.exe
-
-# Allow installer script/source files in DPOS_Installer
-!DPOS_Installer/
-!DPOS_Installer/*.iss
-!DPOS_Installer/README*
-!DPOS_Installer/*.txt
-!DPOS_Installer/*.md
-
-# 6. Database dumps / local databases
-*.dump
-*.sql
+# 8. Local databases / dumps / backups
+*.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
-*.db
+*.dump
+*.sql
 *.bak
 
-# 7. Log Files
-*.log
-dpos_app.log
+# 9. AI model weights / large downloaded files
+*.h5
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.pb
 
-# 8. Generated handoff / temporary files
-project_code_part_1.txt
-project_code_part_2.txt
+# 10. Generated handoff / temporary files
 handoff/
+project_code_part_*.txt
 project_structure.txt
+
+# 11. Keep installer source files
+# Do NOT ignore installer/ because it contains FaceLens_Installer.iss and installed_mode.txt.
+!installer/
+!installer/*.iss
+!installer/*.txt
+!installer/*.md
+
+# 12. Keep assets source files
+!assets/
+!assets/*.png
+!assets/*.ico
+!assets/*.jpg
+!assets/*.jpeg
+
+# FaceLens runtime data
+data/
+logs/
+backups/
+temp_files/
+.deepface/

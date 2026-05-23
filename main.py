@@ -57,6 +57,7 @@ from core.performance_profiles import PERFORMANCE_PROFILES, get_performance_prof
 from core.recognition_worker import RecognitionWorker
 from core.ui_styles import STYLESHEET
 from core.video_thread import VideoThread
+from core.version import version_text
 
 
 try:
@@ -329,7 +330,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "เริ่มต้นใช้งาน FaceLens",
-            "คำแนะนำการใช้งาน:\n\n"
+            "คำแนะนำสำหรับร้านยา:\n\n"
             "1. วางกล้องให้เห็นหน้าลูกค้าชัด แสงไม่ย้อนมากเกินไป\n"
             "2. เริ่มจากโหมดความเร็ว: สมดุล และความมั่นใจ: ปลอดภัยสูง\n"
             "3. หากกล้องไม่ขึ้น ให้เปลี่ยนหมายเลขในช่อง 'กล้อง'\n"
@@ -560,7 +561,7 @@ def main() -> int:
     install_exception_logger()
 
     if "--version" in sys.argv:
-        print("FaceLens 0.14")
+        print(version_text())
         return 0
 
     if "--health-check" in sys.argv:

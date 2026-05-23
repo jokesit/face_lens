@@ -55,17 +55,49 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 APP_PATH = get_app_path()
-DATA_DIR = APP_PATH / "data"
-TEMP_DIR = APP_PATH / "temp_files"
+
+
+def is_installed_build() -> bool:
+    """Return True when this frozen build was installed by the Windows installer.
+
+    Portable ZIP releases should keep data beside FaceLens.exe. Installed builds
+    live under C:\\Program Files, which is not writable for normal users, so
+    runtime data must move to C:\\ProgramData\\FaceLens.
+    """
+    return bool(getattr(sys, "frozen", False) and (APP_PATH / "installed_mode.txt").exists())
+
+
+def get_runtime_path() -> Path:
+    """Return the writable runtime folder for data/logs/backups/temp files."""
+    override = os.getenv("FACELENS_RUNTIME_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+
+    if is_installed_build():
+        program_data = os.getenv("PROGRAMDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(program_data) / "FaceLens"
+
+    return APP_PATH
+
+
+RUNTIME_PATH = get_runtime_path()
+DATA_DIR = RUNTIME_PATH / "data"
+TEMP_DIR = RUNTIME_PATH / "temp_files"
 ASSETS_DIR = resolve_resource_path("assets")
 LOGO_PNG_PATH = resolve_resource_path("assets/logo.png")
 LOGO_ICO_PATH = resolve_resource_path("assets/logo.ico")
 DB_PATH = DATA_DIR / "facelens.db"
-LOG_DIR = APP_PATH / "logs"
-BACKUP_DIR = APP_PATH / "backups"
+LOG_DIR = RUNTIME_PATH / "logs"
+BACKUP_DIR = RUNTIME_PATH / "backups"
+DEEPFACE_RUNTIME_HOME = RUNTIME_PATH / ".deepface"
 
-for folder in (DATA_DIR, TEMP_DIR, LOG_DIR, BACKUP_DIR):
+for folder in (DATA_DIR, TEMP_DIR, LOG_DIR, BACKUP_DIR, DEEPFACE_RUNTIME_HOME / "weights"):
     folder.mkdir(parents=True, exist_ok=True)
+
+# Keep DeepFace aligned with the writable runtime location when the program is
+# installed under Program Files. The PyInstaller runtime hook sets this earlier
+# for frozen builds; this line keeps source/dev runs consistent too.
+os.environ.setdefault("DEEPFACE_HOME", str(DEEPFACE_RUNTIME_HOME))
 
 # Camera/display
 CAMERA_INDEX = int(os.getenv("FACELENS_CAMERA_INDEX", "0"))

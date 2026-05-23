@@ -1,43 +1,122 @@
-# FaceLens Windows Build Guide
+# FaceLens Windows Build and Installer Guide
 
-## Recommended build type
+## Recommended distribution types
 
-Use **onedir** packaging first. FaceLens depends on TensorFlow, DeepFace,
-MediaPipe, OpenCV, FAISS, and PySide6. These packages are large and contain many
-native DLL/data files, so onedir is more reliable than onefile for the first
-public pharmacy release.
+FaceLens now supports two distribution modes:
 
-The output will be:
+1. **Installer mode — recommended for real pharmacy use**
+   - Installs to `C:\Program Files\FaceLens`
+   - Creates a Desktop shortcut and Start Menu shortcut
+   - Stores writable data in `C:\ProgramData\FaceLens`
+   - Best for non-technical pharmacy staff
 
-```text
-dist/FaceLens/FaceLens.exe
-```
+2. **Portable ZIP mode — useful for testing**
+   - User extracts a folder and opens `FaceLens.exe`
+   - Runtime data stays beside the EXE
+   - Good for quick testing, but less professional than installer mode
 
-Send the whole `dist/FaceLens` folder to a test machine, not only the EXE.
-
-## Build release
+## Build the EXE bundle
 
 ```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\scripts\build_windows.ps1
+```
+
+The output is:
+
+```text
+dist\FaceLens\FaceLens.exe
+```
+
+## Build the professional Windows installer
+
+FaceLens uses Inno Setup for the Windows installer. After installing Inno Setup
+on the build machine, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\build_installer_windows.ps1
+```
+
+The installer is created at:
+
+```text
+release\FaceLens_0.16_Setup.exe
+```
+
+The installer will:
+
+```text
+Install app files to:  C:\Program Files\FaceLens
+Store shop data in:   C:\ProgramData\FaceLens
+Create Desktop icon:  FaceLens
+Create Start Menu:    FaceLens
+```
+
+## Why data is not stored in Program Files
+
+Windows normally protects `C:\Program Files`. Normal users may not be able to
+write databases, logs, backups, or downloaded AI model weights there.
+
+For installed releases, FaceLens stores runtime data in:
+
+```text
+C:\ProgramData\FaceLens
+```
+
+Important folders:
+
+```text
+C:\ProgramData\FaceLens\data       # SQLite database and settings
+C:\ProgramData\FaceLens\backups    # database backups
+C:\ProgramData\FaceLens\logs       # support logs
+C:\ProgramData\FaceLens\temp_files # temporary files / matplotlib cache
+C:\ProgramData\FaceLens\.deepface  # DeepFace model weights
 ```
 
 ## Build debug-console version
 
-Use this when the release EXE opens and immediately closes:
+Use this if the release EXE opens and immediately closes:
 
 ```powershell
 .\scripts\build_windows.ps1 -Debug
 .\scripts\run_frozen_debug.ps1
 ```
 
-The debug build shows a console window and also writes logs beside the EXE.
+## Smoke test frozen app
+
+```powershell
+.\dist\FaceLens\FaceLens.exe --version
+.\dist\FaceLens\FaceLens.exe --health-check
+```
+
+## Create portable ZIP
+
+Installer mode is recommended, but a clean portable ZIP can still be created:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\create_release_zip.ps1
+```
+
+Output:
+
+```text
+release\FaceLens_0.16_Portable_PharmacyStandalone.zip
+```
 
 ## Logs to ask from the pharmacy
 
-After running the EXE, ask the user to send this folder:
+Installed mode:
 
 ```text
-dist/FaceLens/logs
+C:\ProgramData\FaceLens\logs
+```
+
+Portable ZIP mode:
+
+```text
+FaceLens\logs
 ```
 
 Important files:
@@ -48,17 +127,10 @@ facelens_startup.log
 facelens_crash.log
 ```
 
-## Smoke test frozen app
+## Release safety rules
 
-```powershell
-.\dist\FaceLens\FaceLens.exe --version
-.\dist\FaceLens\FaceLens.exe --health-check
-```
-
-## Important notes
-
-- Do not ship a real `data/facelens.db` with customer data.
-- The runtime database is created beside the EXE in `data/facelens.db`.
-- Backups are stored in `backups/` beside the EXE.
-- DeepFace weights are stored in `.deepface/weights/` beside the EXE.
-- For the first few releases, prefer zip distribution of the full onedir folder.
+- Do not ship a real `facelens.db` with customer data.
+- Do not ship development logs or backups.
+- Prefer installer mode for pharmacies.
+- Keep portable ZIP only for quick testing or support.
+- Test on a clean Windows machine before sending to a real pharmacy.

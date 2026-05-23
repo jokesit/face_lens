@@ -83,3 +83,4 @@ Write-Host "`nBuild finished successfully." -ForegroundColor Green
 Write-Host "Output folder: dist\$buildName" -ForegroundColor Green
 Write-Host "Executable: $exePath" -ForegroundColor Green
 Write-Host "Runtime logs after launch: dist\$buildName\logs" -ForegroundColor Yellow
+Write-Host "Create release ZIP with: .\scripts\create_release_zip.ps1" -ForegroundColor Yellow

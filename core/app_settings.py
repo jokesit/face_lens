@@ -20,6 +20,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "performance_profile": DEFAULT_PROFILE_KEY,
     "controls_collapsed": False,
     "confidence_profile": DEFAULT_CONFIDENCE_PROFILE_KEY,
+    "camera_index": 0,
+    "first_run_done": False,
 }
 
 
@@ -79,3 +81,23 @@ class AppSettings:
             raise ValueError(f"Unknown confidence profile: {key}")
         self.values["confidence_profile"] = key
         self.save()
+
+    def get_camera_index(self) -> int:
+        try:
+            value = int(self.values.get("camera_index", 0))
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, min(9, value))
+
+    def set_camera_index(self, camera_index: int) -> None:
+        self.values["camera_index"] = max(0, min(9, int(camera_index)))
+        self.save()
+
+
+    def get_first_run_done(self) -> bool:
+        return bool(self.values.get("first_run_done", False))
+
+    def set_first_run_done(self, done: bool = True) -> None:
+        self.values["first_run_done"] = bool(done)
+        self.save()
+

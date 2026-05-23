@@ -49,10 +49,12 @@ class VideoThread(QThread):
     update_display_name_signal = Signal(str)
     capture_hint_signal = Signal(str)
 
-    def __init__(self):
+    def __init__(self, camera_index: int | None = None):
         super().__init__()
         self.detector = FaceRecognizer()
         self.is_running = True
+        self.camera_index = CAMERA_INDEX if camera_index is None else int(camera_index)
+        self._camera_restart_requested = False
         self.frame_counter = 0
         self.recognition_job_pending = False
         self.last_known_results: dict[FaceBox, tuple[str, float | None, str]] = {}
@@ -118,6 +120,19 @@ class VideoThread(QThread):
         self.recognition_job_pending = False
         print(f"Performance profile applied: {profile.thai_name}")
 
+    @Slot(int)
+    def set_camera_index(self, camera_index: int) -> None:
+        camera_index = max(0, min(9, int(camera_index)))
+        if camera_index == self.camera_index:
+            return
+        self.camera_index = camera_index
+        self._camera_restart_requested = True
+        self.recognition_job_pending = False
+        self.last_known_results = {}
+        self.cached_observations = []
+        self.last_result_at = 0.0
+        self.update_display_name_signal.emit("Switching Camera")
+
     @Slot(bool)
     def set_capture_mode(self, is_active: bool) -> None:
         self.is_capture_mode = is_active
@@ -132,53 +147,60 @@ class VideoThread(QThread):
 
     def run(self) -> None:
         backend = cv2.CAP_DSHOW if platform.system() == "Windows" else 0
-        cap = cv2.VideoCapture(CAMERA_INDEX, backend)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        if not cap.isOpened():
-            self.update_display_name_signal.emit("Camera Error")
-            return
+        while self.is_running:
+            self._camera_restart_requested = False
+            cap = cv2.VideoCapture(self.camera_index, backend)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        try:
-            while self.is_running:
-                min_frame_seconds = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
-                frame_started_at = time.perf_counter()
-                ret, cv_img = cap.read()
-                if not ret:
-                    self.msleep(30)
-                    continue
+            if not cap.isOpened():
+                self.update_display_name_signal.emit("Camera Error")
+                cap.release()
+                # Keep the thread alive briefly so the operator can choose another camera.
+                while self.is_running and not self._camera_restart_requested:
+                    self.msleep(200)
+                continue
 
-                self.raw_frame_signal.emit(cv_img)
-                frame_to_display = cv_img.copy()
+            try:
+                while self.is_running and not self._camera_restart_requested:
+                    min_frame_seconds = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
+                    frame_started_at = time.perf_counter()
+                    ret, cv_img = cap.read()
+                    if not ret:
+                        self.msleep(30)
+                        continue
 
-                should_detect = (
-                    self.is_capture_mode
-                    or self.frame_counter % self.face_detection_interval_frames == 0
-                    or not self.cached_observations
-                )
-                if should_detect:
-                    faces, boxes = self.detector.detect_faces(frame_to_display)
-                    observations = self._build_observations(faces, boxes)
-                    self.cached_observations = observations
-                else:
-                    observations = self.cached_observations
+                    self.raw_frame_signal.emit(cv_img)
+                    frame_to_display = cv_img.copy()
 
-                if self.is_capture_mode:
-                    self._handle_capture_mode(observations)
-                else:
-                    self._handle_recognition_mode(observations)
+                    should_detect = (
+                        self.is_capture_mode
+                        or self.frame_counter % self.face_detection_interval_frames == 0
+                        or not self.cached_observations
+                    )
+                    if should_detect:
+                        faces, boxes = self.detector.detect_faces(frame_to_display)
+                        observations = self._build_observations(faces, boxes)
+                        self.cached_observations = observations
+                    else:
+                        observations = self.cached_observations
 
-                self._emit_display_frame(frame_to_display, observations)
+                    if self.is_capture_mode:
+                        self._handle_capture_mode(observations)
+                    else:
+                        self._handle_recognition_mode(observations)
 
-                self.frame_counter += 1
-                elapsed = time.perf_counter() - frame_started_at
-                sleep_ms = int(max(0.0, min_frame_seconds - elapsed) * 1000)
-                if sleep_ms > 0:
-                    self.msleep(sleep_ms)
-        finally:
-            cap.release()
+                    self._emit_display_frame(frame_to_display, observations)
+
+                    self.frame_counter += 1
+                    elapsed = time.perf_counter() - frame_started_at
+                    sleep_ms = int(max(0.0, min_frame_seconds - elapsed) * 1000)
+                    if sleep_ms > 0:
+                        self.msleep(sleep_ms)
+            finally:
+                cap.release()
 
     def _build_observations(self, faces, boxes) -> list[FaceObservation]:
         observations: list[FaceObservation] = []

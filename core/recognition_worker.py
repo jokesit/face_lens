@@ -6,7 +6,14 @@ import faiss
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
-from core.config import RECOGNITION_AMBIGUITY_MARGIN, RECOGNITION_THRESHOLD, RECOGNITION_TOP_K
+from core.config import (
+    ENROLLMENT_DUPLICATE_STRICT_DISTANCE,
+    ENROLLMENT_DUPLICATE_WARNING_DISTANCE,
+    ENROLLMENT_NEAREST_MATCH_LIMIT,
+    RECOGNITION_AMBIGUITY_MARGIN,
+    RECOGNITION_THRESHOLD,
+    RECOGNITION_TOP_K,
+)
 from core.confidence_profiles import DEFAULT_CONFIDENCE_PROFILE_KEY, get_confidence_profile
 from core.database import Database
 from core.face_recognizer import FaceRecognizer
@@ -22,7 +29,7 @@ class RecognitionWorker(QObject):
 
     recognition_results = Signal(list)
     snapshot_result = Signal(object)
-    verification_result = Signal(str, float)
+    verification_result = Signal(object)
     worker_ready = Signal(str)
     worker_error = Signal(str)
 
@@ -163,29 +170,47 @@ class RecognitionWorker(QObject):
 
     @Slot(list, str)
     def process_verification_job(self, captured_embeddings: list[np.ndarray], name: str) -> None:
+        """Check whether a new enrollment is an update or a likely duplicate.
+
+        Batch 11 extends the old same-name verification. The worker now compares
+        the new face profile with every active customer centroid so the shop does
+        not accidentally save the same person under a different name.
+        """
+        payload = {
+            "requested_name": name,
+            "same_name_distance": None,
+            "nearest_matches": [],
+            "duplicate_warning_distance": ENROLLMENT_DUPLICATE_WARNING_DISTANCE,
+            "duplicate_strict_distance": ENROLLMENT_DUPLICATE_STRICT_DISTANCE,
+            "error": None,
+        }
         try:
             valid_embeddings = [np.asarray(e, dtype=np.float32) for e in captured_embeddings if e is not None]
             if not valid_embeddings:
-                self.verification_result.emit(name, -1.0)
+                payload["error"] = "ไม่พบภาพใบหน้าที่พร้อมตรวจสอบ"
+                self.verification_result.emit(payload)
                 return
 
             new_avg = np.mean(valid_embeddings, axis=0).astype(np.float32)
             norm = np.linalg.norm(new_avg)
             if norm == 0:
-                self.verification_result.emit(name, -1.0)
+                payload["error"] = "ไม่สามารถสร้างข้อมูลใบหน้าจากภาพชุดนี้ได้"
+                self.verification_result.emit(payload)
                 return
             new_avg = new_avg / norm
 
             db = Database()
             try:
                 existing = db.get_customer_by_name(name)
+                if existing and isinstance(existing.get("avg_embedding"), np.ndarray):
+                    payload["same_name_distance"] = float(np.linalg.norm(new_avg - existing["avg_embedding"]))
+                matches = db.find_nearest_customers_by_embedding(new_avg, limit=ENROLLMENT_NEAREST_MATCH_LIMIT)
+                payload["nearest_matches"] = matches
             finally:
                 db.close()
 
-            distance = -1.0
-            if existing and isinstance(existing.get("avg_embedding"), np.ndarray):
-                distance = float(np.linalg.norm(new_avg - existing["avg_embedding"]))
-            self.verification_result.emit(name, distance)
+            self.verification_result.emit(payload)
         except Exception as exc:
             print(f"Verification job failed: {exc}")
-            self.verification_result.emit(name, -1.0)
+            payload["error"] = str(exc)
+            self.verification_result.emit(payload)

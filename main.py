@@ -12,7 +12,11 @@ import sys
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from core.frozen_runtime import setup_runtime_environment
+
+setup_runtime_environment()
+
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from add_customer_dialog import AddCustomerDialog
 from customer_management_dialog import CustomerManagementDialog
+from health_check_dialog import HealthCheckDialog
 from core.app_logging import install_exception_logger
 from core.app_settings import AppSettings
 from core.config import (
@@ -66,12 +71,13 @@ class MainWindow(QMainWindow):
     debug_distance_toggled = Signal(bool)
     performance_profile_changed = Signal(str)
     confidence_profile_changed = Signal(str)
+    camera_index_changed = Signal(int)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FaceLens - ระบบจดจำใบหน้าสำหรับร้านค้า")
         self.resize(APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT)
-        self.setMinimumSize(760, 620)
+        self.setMinimumSize(800, 720)
         self.setWindowIcon(QIcon(str(ASSETS_DIR / "logo.png")))
         self.db = Database()
         self.settings = AppSettings()
@@ -91,11 +97,14 @@ class MainWindow(QMainWindow):
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setText("กำลังเปิดกล้อง...")
         self.image_label.setMinimumSize(DISPLAY_WIDTH, DISPLAY_HEIGHT)
+        self.image_label.setMinimumHeight(DISPLAY_HEIGHT)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.name_label = QLabel(self)
         self.name_label.setObjectName("NameLabel")
         self.name_label.setAlignment(Qt.AlignCenter)
+        self.name_label.setMinimumHeight(48)
+        self.name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.status_label = QLabel("สถานะ: กำลังเริ่มต้นระบบ")
         self.status_label.setObjectName("StatusLabel")
@@ -114,6 +123,10 @@ class MainWindow(QMainWindow):
         self.restore_button = QPushButton("กู้คืนฐานข้อมูล", self)
         self.restore_button.setToolTip("กู้คืนข้อมูลจากไฟล์สำรอง .db ใช้เมื่อย้ายเครื่องหรือกู้ข้อมูล")
         self.restore_button.clicked.connect(self.restore_database)
+
+        self.health_check_button = QPushButton("ตรวจระบบ", self)
+        self.health_check_button.setToolTip("ตรวจ dependency, ฐานข้อมูล, พื้นที่จัดเก็บ และความพร้อมของโปรแกรม")
+        self.health_check_button.clicked.connect(self.open_health_check_dialog)
 
         self.performance_combo = QComboBox(self)
         for key, profile in PERFORMANCE_PROFILES.items():
@@ -143,6 +156,15 @@ class MainWindow(QMainWindow):
         self.confidence_hint_label.setWordWrap(True)
         self._update_confidence_hint(saved_confidence_key)
 
+        self.camera_combo = QComboBox(self)
+        self.camera_combo.setToolTip("เลือกกล้องที่ต้องการใช้ หากกล้องไม่ขึ้นให้ลองเปลี่ยนเป็นหมายเลขถัดไป")
+        for index in range(5):
+            self.camera_combo.addItem(f"กล้อง {index}", index)
+        saved_camera_index = self.settings.get_camera_index()
+        camera_combo_index = self.camera_combo.findData(saved_camera_index)
+        self.camera_combo.setCurrentIndex(camera_combo_index if camera_combo_index >= 0 else 0)
+        self.camera_combo.currentIndexChanged.connect(self.on_camera_selected)
+
         self.debug_distance_checkbox = QCheckBox("โหมดตรวจสอบ: แสดงค่าความใกล้เคียง")
         self.debug_distance_checkbox.setToolTip("ใช้สำหรับทดสอบและปรับ threshold เท่านั้น ไม่แนะนำให้เปิดตอนใช้งานหน้าร้าน")
         self.debug_distance_checkbox.setChecked(SHOW_DEBUG_DISTANCE)
@@ -165,12 +187,18 @@ class MainWindow(QMainWindow):
         tuning_layout.addSpacing(8)
         tuning_layout.addWidget(confidence_label)
         tuning_layout.addWidget(self.confidence_combo)
+        tuning_layout.addSpacing(8)
+        camera_label = QLabel("กล้อง:")
+        camera_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        tuning_layout.addWidget(camera_label)
+        tuning_layout.addWidget(self.camera_combo)
 
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.add_customer_button)
         button_layout.addWidget(self.manage_customer_button)
         button_layout.addWidget(self.backup_button)
         button_layout.addWidget(self.restore_button)
+        button_layout.addWidget(self.health_check_button)
 
         self.controls_panel = QWidget(self)
         self.controls_panel.setObjectName("ControlsPanel")
@@ -186,10 +214,11 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
         layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(7)
         layout.addWidget(title_label)
         layout.addWidget(subtitle_label)
         layout.addWidget(self.image_label, stretch=1)
+        layout.addSpacing(4)
         layout.addWidget(self.name_label)
         layout.addWidget(self.controls_toggle_button, alignment=Qt.AlignCenter)
         layout.addWidget(self.controls_panel)
@@ -200,7 +229,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("กำลังเริ่มต้นระบบ")
         self.apply_controls_collapsed(self.settings.get_controls_collapsed())
 
-        self.video_thread = VideoThread()
+        self.video_thread = VideoThread(camera_index=self.settings.get_camera_index())
         self.recognition_thread = QThread(self)
         self.recognition_worker = RecognitionWorker()
         self.recognition_worker.moveToThread(self.recognition_thread)
@@ -224,6 +253,7 @@ class MainWindow(QMainWindow):
         self.debug_distance_toggled.connect(self.video_thread.set_show_debug_distance)
         self.performance_profile_changed.connect(self.video_thread.set_performance_profile)
         self.confidence_profile_changed.connect(self.recognition_worker.set_confidence_profile)
+        self.camera_index_changed.connect(self.video_thread.set_camera_index)
         self.rebuild_index_signal.connect(self.recognition_worker.build_faiss_index)
         self.verification_job_signal.connect(self.recognition_worker.process_verification_job)
 
@@ -234,6 +264,8 @@ class MainWindow(QMainWindow):
         self.rebuild_faiss_index()
         self.performance_profile_changed.emit(self.settings.get_performance_profile_key())
         self.confidence_profile_changed.emit(self.settings.get_confidence_profile_key())
+        self.camera_index_changed.emit(self.settings.get_camera_index())
+        QTimer.singleShot(700, self.show_first_run_tip_if_needed)
 
     @Slot(int)
     def on_performance_profile_selected(self, _index: int) -> None:
@@ -260,6 +292,27 @@ class MainWindow(QMainWindow):
     def _update_confidence_hint(self, profile_key: str) -> None:
         profile = get_confidence_profile(profile_key)
         self.confidence_hint_label.setText(f"ความมั่นใจ: {profile.description}")
+
+    @Slot(int)
+    def on_camera_selected(self, _index: int) -> None:
+        camera_index = int(self.camera_combo.currentData())
+        self.settings.set_camera_index(camera_index)
+        self.camera_index_changed.emit(camera_index)
+        self.set_status(f"สถานะ: กำลังสลับไปใช้กล้อง {camera_index}")
+
+    def show_first_run_tip_if_needed(self) -> None:
+        if self.settings.get_first_run_done():
+            return
+        self.settings.set_first_run_done(True)
+        QMessageBox.information(
+            self,
+            "เริ่มต้นใช้งาน FaceLens",
+            "คำแนะนำสำหรับร้านยา:\n\n"
+            "1. วางกล้องให้เห็นหน้าลูกค้าชัด แสงไม่ย้อนมากเกินไป\n"
+            "2. เริ่มจากโหมดความเร็ว: สมดุล และความมั่นใจ: ปลอดภัยสูง\n"
+            "3. หากกล้องไม่ขึ้น ให้เปลี่ยนหมายเลขในช่อง 'กล้อง'\n"
+            "4. สำรองฐานข้อมูลเป็นประจำ เพื่อป้องกันข้อมูลลูกค้าหาย",
+        )
 
     def open_add_customer_dialog(self) -> None:
         dialog = AddCustomerDialog(parent=self)
@@ -292,6 +345,11 @@ class MainWindow(QMainWindow):
         dialog.customers_changed.connect(self.on_customer_saved)
         dialog.exec()
         dialog.customers_changed.disconnect(self.on_customer_saved)
+
+    def open_health_check_dialog(self) -> None:
+        camera_index = int(self.camera_combo.currentData() or 0)
+        dialog = HealthCheckDialog(self.db, camera_index=camera_index, parent=self)
+        dialog.exec()
 
     def rebuild_faiss_index(self) -> None:
         db_data = self.db.get_all_data_for_faiss()
@@ -363,6 +421,9 @@ class MainWindow(QMainWindow):
         elif name == "Searching...":
             text, color, bg_color = "พร้อมจดจำใบหน้า", "#2980B9", "#EBF5FB"
             status = "สถานะ: ระบบพร้อมใช้งาน"
+        elif name == "Switching Camera":
+            text, color, bg_color = "กำลังสลับกล้อง...", "#2980B9", "#EBF5FB"
+            status = "สถานะ: กำลังเปิดกล้องที่เลือก กรุณารอสักครู่"
         elif name != "Unknown":
             text, color, bg_color = f"สวัสดีคุณ {name}", "#2ECC71", "#E8F8F5"
             status = "สถานะ: พบลูกค้าที่บันทึกไว้แล้ว"
@@ -372,7 +433,7 @@ class MainWindow(QMainWindow):
 
         self.name_label.setStyleSheet(
             f"background-color: {bg_color}; color: {color}; font-size: 20px; "
-            "font-weight: 800; padding: 8px; border-radius: 8px;"
+            "font-weight: 800; padding: 10px 8px; border-radius: 8px;"
         )
         self.name_label.setText(text)
         self.set_status(status)
@@ -454,8 +515,32 @@ class MainWindow(QMainWindow):
         self.set_status("สถานะ: กู้คืนฐานข้อมูลและสร้างดัชนีใบหน้าใหม่เรียบร้อยแล้ว")
 
 
-if __name__ == "__main__":
+def run_cli_health_check() -> int:
+    """Run a non-GUI health check for source and frozen support diagnostics."""
+    from core.health_check import run_health_checks
+
+    db = Database()
+    report = run_health_checks(db, include_camera="--camera" in sys.argv)
+    print(report.summary)
+    print()
+    for row in report.items:
+        symbol = "✅" if row.status == "ok" else "⚠️" if row.status == "warning" else "❌"
+        print(f"{symbol} {row.name}: {row.message}")
+        if row.detail:
+            print(f"   {row.detail}")
+    return 1 if report.has_error else 0
+
+
+def main() -> int:
     install_exception_logger()
+
+    if "--version" in sys.argv:
+        print("FaceLens 0.14")
+        return 0
+
+    if "--health-check" in sys.argv:
+        return run_cli_health_check()
+
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(ASSETS_DIR / "logo.png")))
     app.setStyleSheet(STYLESHEET)
@@ -471,4 +556,8 @@ if __name__ == "__main__":
     window = MainWindow()
     splash.finish(window)
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

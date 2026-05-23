@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from core.config import RECOGNITION_EVENTS_RETENTION_DAYS
+from core.config import ENROLLMENT_DUPLICATE_WARNING_DISTANCE, RECOGNITION_EVENTS_RETENTION_DAYS, RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER
 from core.database import Database
 
 
@@ -114,6 +114,8 @@ class CustomerManagementDialog(QDialog):
         self.prune_events_button.setObjectName("MaintenanceButton")
         self.optimize_button = QPushButton("ปรับฐานข้อมูลให้เร็วขึ้น")
         self.optimize_button.setObjectName("MaintenanceButton")
+        self.duplicates_button = QPushButton("ตรวจรายชื่อซ้ำ")
+        self.duplicates_button.setObjectName("MaintenanceButton")
         self.close_button = QPushButton("ปิด")
         self.close_button.setObjectName("NeutralButton")
 
@@ -129,6 +131,7 @@ class CustomerManagementDialog(QDialog):
 
         maintenance_buttons = QHBoxLayout()
         maintenance_buttons.addStretch(1)
+        maintenance_buttons.addWidget(self.duplicates_button)
         maintenance_buttons.addWidget(self.prune_events_button)
         maintenance_buttons.addWidget(self.optimize_button)
 
@@ -151,6 +154,7 @@ class CustomerManagementDialog(QDialog):
         self.hard_delete_button.clicked.connect(self.hard_delete_selected_customer)
         self.prune_events_button.clicked.connect(self.prune_old_events)
         self.optimize_button.clicked.connect(self.optimize_database)
+        self.duplicates_button.clicked.connect(self.check_possible_duplicates)
         self.close_button.clicked.connect(self.accept)
         self.table.itemSelectionChanged.connect(self.update_selected_customer_label)
         self.table.itemDoubleClicked.connect(lambda _item: self.rename_selected_customer())
@@ -209,8 +213,9 @@ class CustomerManagementDialog(QDialog):
         name = name_item.text() if name_item else "-"
         status = status_item.text() if status_item else "-"
         embeddings = embeddings_item.text() if embeddings_item else "0"
+        max_hint = f" / แนะนำไม่เกิน {RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER}"
         self.selected_customer_label.setText(
-            f"กำลังเลือก: {name} | สถานะ: {status} | ใบหน้าที่ใช้จดจำ: {embeddings} รายการ"
+            f"กำลังเลือก: {name} | สถานะ: {status} | ใบหน้าที่ใช้จดจำ: {embeddings} รายการ{max_hint}"
         )
 
     def _selected_customer_id(self) -> int | None:
@@ -351,6 +356,39 @@ class CustomerManagementDialog(QDialog):
             QMessageBox.information(self, "ล้างประวัติเก่าแล้ว", f"ลบประวัติการจดจำเก่าออกแล้ว {removed} รายการ")
         except Exception as exc:
             QMessageBox.critical(self, "ล้างประวัติไม่สำเร็จ", f"ไม่สามารถล้างประวัติเก่าได้:\n{exc}")
+
+    def check_possible_duplicates(self) -> None:
+        """Show likely duplicate customer records based on average embeddings."""
+        try:
+            duplicates = self.db.find_possible_duplicate_customers(ENROLLMENT_DUPLICATE_WARNING_DISTANCE)
+        except Exception as exc:
+            QMessageBox.critical(self, "ตรวจรายชื่อซ้ำไม่สำเร็จ", f"ไม่สามารถตรวจรายชื่อซ้ำได้:\n{exc}")
+            return
+
+        if not duplicates:
+            QMessageBox.information(
+                self,
+                "ไม่พบรายชื่อที่น่าจะซ้ำ",
+                "ยังไม่พบลูกค้าที่ใบหน้าใกล้เคียงกันมากในระดับที่ควรตรวจสอบ\n\n"
+                "ระบบจะตรวจซ้ำให้อีกครั้งทุกครั้งที่บันทึกลูกค้าใหม่",
+            )
+            return
+
+        lines = []
+        for item in duplicates[:15]:
+            lines.append(
+                f"- {item['left_name']} ↔ {item['right_name']} | ระยะ {item['distance']:.3f}"
+            )
+        if len(duplicates) > 15:
+            lines.append(f"... และอีก {len(duplicates) - 15} คู่")
+
+        QMessageBox.warning(
+            self,
+            "พบรายชื่อที่ควรตรวจสอบ",
+            "ระบบพบลูกค้าบางรายที่ใบหน้าคล้ายกันมาก อาจเป็นคนเดียวกันที่ถูกบันทึกซ้ำ\n\n"
+            + "\n".join(lines)
+            + "\n\nคำแนะนำ: ตรวจสอบจากข้อมูลจริงก่อนลบหรือรวมข้อมูล เพื่อป้องกันการลบผิดคน",
+        )
 
     def optimize_database(self) -> None:
         reply = QMessageBox.question(

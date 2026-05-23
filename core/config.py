@@ -41,9 +41,9 @@ CAMERA_INDEX = int(os.getenv("FACELENS_CAMERA_INDEX", "0"))
 CAMERA_WIDTH = int(os.getenv("FACELENS_CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.getenv("FACELENS_CAMERA_HEIGHT", "480"))
 DISPLAY_WIDTH = int(os.getenv("FACELENS_DISPLAY_WIDTH", "640"))
-DISPLAY_HEIGHT = int(os.getenv("FACELENS_DISPLAY_HEIGHT", "430"))
+DISPLAY_HEIGHT = int(os.getenv("FACELENS_DISPLAY_HEIGHT", "440"))
 APP_WINDOW_WIDTH = int(os.getenv("FACELENS_WINDOW_WIDTH", "860"))
-APP_WINDOW_HEIGHT = int(os.getenv("FACELENS_WINDOW_HEIGHT", "700"))
+APP_WINDOW_HEIGHT = int(os.getenv("FACELENS_WINDOW_HEIGHT", "800"))
 TARGET_FPS = float(os.getenv("FACELENS_TARGET_FPS", "15"))
 FACE_DETECTION_INTERVAL_FRAMES = max(1, int(os.getenv("FACELENS_FACE_DETECTION_INTERVAL", "1")))
 # Batch 7 adds runtime performance profiles. Environment values above are kept
@@ -91,3 +91,10 @@ RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER = int(os.getenv("FACELENS_MAX_EMBEDDINGS
 
 # Keep event logs useful without allowing the SQLite file to grow forever.
 RECOGNITION_EVENTS_RETENTION_DAYS = int(os.getenv("FACELENS_EVENT_RETENTION_DAYS", "90"))
+
+# Enrollment duplicate prevention. These thresholds are intentionally stricter
+# than live recognition because saving the same person under two names creates
+# long-term confusion when a standalone pharmacy database reaches thousands of customers.
+ENROLLMENT_DUPLICATE_WARNING_DISTANCE = float(os.getenv("FACELENS_ENROLLMENT_DUPLICATE_WARNING_DISTANCE", "0.68"))
+ENROLLMENT_DUPLICATE_STRICT_DISTANCE = float(os.getenv("FACELENS_ENROLLMENT_DUPLICATE_STRICT_DISTANCE", "0.55"))
+ENROLLMENT_NEAREST_MATCH_LIMIT = int(os.getenv("FACELENS_ENROLLMENT_NEAREST_MATCH_LIMIT", "5"))

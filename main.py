@@ -43,7 +43,7 @@ from core.app_settings import AppSettings
 from core.config import (
     APP_WINDOW_HEIGHT,
     APP_WINDOW_WIDTH,
-    ASSETS_DIR,
+    LOGO_PNG_PATH,
     BACKUP_DIR,
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
@@ -65,6 +65,27 @@ except (ImportError, AttributeError):
     pass
 
 
+def build_app_icon() -> QIcon:
+    """Return the app icon if bundled; otherwise return an empty icon safely."""
+    if LOGO_PNG_PATH.exists():
+        return QIcon(str(LOGO_PNG_PATH))
+    return QIcon()
+
+
+def build_splash_screen() -> QSplashScreen | None:
+    """Create a splash screen only when the logo image is available."""
+    if not LOGO_PNG_PATH.exists():
+        return None
+    pixmap = QPixmap(str(LOGO_PNG_PATH))
+    if pixmap.isNull():
+        return None
+    splash = QSplashScreen(pixmap)
+    splash.setWindowFlag(Qt.WindowStaysOnTopHint)
+    splash.setFont(QFont("Segoe UI", 18, QFont.Bold))
+    splash.showMessage("กำลังเริ่มต้น FaceLens...", Qt.AlignCenter | Qt.AlignBottom, Qt.black)
+    return splash
+
+
 class MainWindow(QMainWindow):
     rebuild_index_signal = Signal(list)
     verification_job_signal = Signal(list, str)
@@ -78,10 +99,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("FaceLens - ระบบจดจำใบหน้าสำหรับร้านค้า")
         self.resize(APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT)
         self.setMinimumSize(800, 720)
-        self.setWindowIcon(QIcon(str(ASSETS_DIR / "logo.png")))
+        self.setWindowIcon(build_app_icon())
         self.db = Database()
         self.settings = AppSettings()
         self._last_recognition_event_by_key: dict[str, float] = {}
+        self._closing = False
 
         title_label = QLabel("FaceLens AI")
         title_label.setObjectName("TitleLabel")
@@ -307,7 +329,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "เริ่มต้นใช้งาน FaceLens",
-            "คำแนะนำสำหรับร้านยา:\n\n"
+            "คำแนะนำการใช้งาน:\n\n"
             "1. วางกล้องให้เห็นหน้าลูกค้าชัด แสงไม่ย้อนมากเกินไป\n"
             "2. เริ่มจากโหมดความเร็ว: สมดุล และความมั่นใจ: ปลอดภัยสูง\n"
             "3. หากกล้องไม่ขึ้น ให้เปลี่ยนหมายเลขในช่อง 'กล้อง'\n"
@@ -369,6 +391,8 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def log_recognition_events(self, results: list) -> None:
         """Persist throttled recognition events for audit/debugging."""
+        if self._closing:
+            return
         now = time.monotonic()
         for name, _box, distance, _quality_score, note in results:
             if name != "Unknown" and note == "ok":
@@ -393,6 +417,7 @@ class MainWindow(QMainWindow):
                 print(f"Could not log recognition event: {exc}")
 
     def closeEvent(self, event) -> None:
+        self._closing = True
         self.video_thread.stop()
         self.recognition_thread.quit()
         self.recognition_thread.wait(5000)
@@ -542,20 +567,25 @@ def main() -> int:
         return run_cli_health_check()
 
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(ASSETS_DIR / "logo.png")))
+    app.setWindowIcon(build_app_icon())
     app.setStyleSheet(STYLESHEET)
     app.setFont(QFont("Segoe UI", 9))
 
-    pixmap = QPixmap(str(ASSETS_DIR / "logo.png"))
-    splash = QSplashScreen(pixmap)
-    splash.setWindowFlag(Qt.WindowStaysOnTopHint)
-    splash.setFont(QFont("Segoe UI", 18, QFont.Bold))
-    splash.showMessage("กำลังเริ่มต้น FaceLens...", Qt.AlignCenter | Qt.AlignBottom, Qt.black)
-    splash.show()
+    splash = build_splash_screen()
+    if splash is not None:
+        splash.show()
 
     window = MainWindow()
-    splash.finish(window)
     window.show()
+
+    # Important for PyInstaller/Windows: QSplashScreen.finish(widget) can wait
+    # for the target widget to become visible. Calling finish() before
+    # window.show() may leave the app stuck on the logo screen even though
+    # the main window was created successfully. Close it shortly after the
+    # main window is shown so the splash never blocks startup.
+    if splash is not None:
+        QTimer.singleShot(250, lambda: splash.finish(window))
+
     return app.exec()
 
 

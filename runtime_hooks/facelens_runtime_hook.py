@@ -25,8 +25,9 @@ DATA_DIR = APP_DIR / "data"
 BACKUP_DIR = APP_DIR / "backups"
 TEMP_DIR = APP_DIR / "temp_files"
 DEEPFACE_HOME = APP_DIR / ".deepface"
+MPLCONFIG_DIR = APP_DIR / "temp_files" / "matplotlib"
 
-for folder in (LOG_DIR, DATA_DIR, BACKUP_DIR, TEMP_DIR, DEEPFACE_HOME / "weights"):
+for folder in (LOG_DIR, DATA_DIR, BACKUP_DIR, TEMP_DIR, MPLCONFIG_DIR, DEEPFACE_HOME / "weights"):
     folder.mkdir(parents=True, exist_ok=True)
 
 
@@ -62,6 +63,8 @@ for candidate in (
 # these from PowerShell if they need deeper debugging.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("DEEPFACE_HOME", str(DEEPFACE_HOME))
+os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIG_DIR))
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("FACELENS_FROZEN", "1")
 
 # Some native packages use cwd for relative files. In frozen mode, prefer the

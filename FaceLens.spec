@@ -77,7 +77,7 @@ except Exception:
 # Requests may warn or fail if neither charset_normalizer nor chardet is
 # collected. Bundle charset_normalizer explicitly because requests depends on
 # it in the current venv.
-for package_name in ("charset_normalizer", "chardet"):
+for package_name in ("requests", "urllib3", "idna", "certifi", "charset_normalizer", "chardet"):
     try:
         hiddenimports += collect_submodules(package_name)
         datas += collect_data_files(package_name)
@@ -142,6 +142,20 @@ hiddenimports += [
     "pandas",
     "pandas._libs",
     "pandas._libs.tslibs",
+
+    "requests",
+    "requests.compat",
+    "requests.models",
+    "requests.sessions",
+    "urllib3",
+    "idna",
+    "certifi",
+    "charset_normalizer.api",
+    "charset_normalizer.legacy",
+    "charset_normalizer.models",
+    "charset_normalizer.utils",
+    "charset_normalizer.version",
+    "charset_normalizer.cd",
     "charset_normalizer",
     "charset_normalizer.md",
     "charset_normalizer.md__mypyc",

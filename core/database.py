@@ -10,13 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from core.config import (
-    DB_PATH,
-    ENROLLMENT_DUPLICATE_WARNING_DISTANCE,
-    RECOGNITION_EVENTS_RETENTION_DAYS,
-    RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER,
-    STANDALONE_WARN_EMBEDDINGS,
-)
+from core.config import DB_PATH, RECOGNITION_EVENTS_RETENTION_DAYS, STANDALONE_WARN_EMBEDDINGS
 
 
 class Database:
@@ -58,6 +52,10 @@ class Database:
             return np.load(out, allow_pickle=False).astype(np.float32)
         except Exception:
             return None
+
+    def _ensure_open(self) -> None:
+        if getattr(self, "conn", None) is None:
+            raise RuntimeError("Database connection is already closed.")
 
     def _configure_connection(self) -> None:
         with self._lock:
@@ -251,152 +249,6 @@ class Database:
             "scale_warning": int(active_embeddings) >= STANDALONE_WARN_EMBEDDINGS,
         }
 
-    def get_customer_active_embedding_count(self, customer_id: int) -> int:
-        with self._lock:
-            row = self.conn.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM face_embeddings
-                WHERE customer_id = ? AND is_active = 1
-                """,
-                (customer_id,),
-            ).fetchone()
-        return int(row["count"] if row else 0)
-
-    def get_customer_embedding_centroid(self, customer_id: int) -> np.ndarray | None:
-        """Return the current average embedding for a customer, if available."""
-        with self._lock:
-            row = self.conn.execute(
-                """
-                SELECT avg_embedding
-                FROM customers
-                WHERE id = ? AND deleted_at IS NULL AND consent_status = 'granted'
-                """,
-                (customer_id,),
-            ).fetchone()
-        if row and isinstance(row["avg_embedding"], np.ndarray):
-            return row["avg_embedding"]
-        return None
-
-    def find_nearest_customers_by_embedding(
-        self,
-        embedding: np.ndarray,
-        limit: int = 5,
-        exclude_customer_id: int | None = None,
-    ) -> list[dict]:
-        """Find customers whose current average face vector is nearest to an embedding.
-
-        This is intentionally used during enrollment, not live recognition. It
-        helps prevent the same person from being saved again under another name
-        when the shop's customer base grows to thousands of records.
-        """
-        query = self._normalize_embedding(embedding)
-        with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT id, name, avg_embedding, image_count
-                FROM customers
-                WHERE deleted_at IS NULL
-                  AND consent_status = 'granted'
-                  AND avg_embedding IS NOT NULL
-                """
-            ).fetchall()
-
-        matches: list[dict] = []
-        for row in rows:
-            customer_id = int(row["id"])
-            if exclude_customer_id is not None and customer_id == exclude_customer_id:
-                continue
-            candidate = row["avg_embedding"]
-            if not isinstance(candidate, np.ndarray):
-                continue
-            distance = float(np.linalg.norm(query - self._normalize_embedding(candidate)))
-            matches.append(
-                {
-                    "customer_id": customer_id,
-                    "name": row["name"],
-                    "distance": distance,
-                    "image_count": int(row["image_count"] or 0),
-                    "is_warning": distance <= ENROLLMENT_DUPLICATE_WARNING_DISTANCE,
-                }
-            )
-        matches.sort(key=lambda item: item["distance"])
-        return matches[: max(1, int(limit))]
-
-    def find_possible_duplicate_customers(self, threshold: float = ENROLLMENT_DUPLICATE_WARNING_DISTANCE) -> list[dict]:
-        """Return likely duplicate customer pairs using average embeddings.
-
-        Intended for maintenance screens/scripts. It uses customer centroids, not
-        every embedding row, so it remains light enough for standalone pharmacy
-        databases with 1,000-5,000 customers.
-        """
-        with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT id, name, avg_embedding, image_count
-                FROM customers
-                WHERE deleted_at IS NULL
-                  AND consent_status = 'granted'
-                  AND avg_embedding IS NOT NULL
-                ORDER BY id
-                """
-            ).fetchall()
-
-        customers: list[tuple[int, str, np.ndarray, int]] = []
-        for row in rows:
-            emb = row["avg_embedding"]
-            if isinstance(emb, np.ndarray):
-                customers.append((int(row["id"]), str(row["name"]), self._normalize_embedding(emb), int(row["image_count"] or 0)))
-
-        duplicates: list[dict] = []
-        for idx, left in enumerate(customers):
-            left_id, left_name, left_emb, left_count = left
-            for right_id, right_name, right_emb, right_count in customers[idx + 1 :]:
-                distance = float(np.linalg.norm(left_emb - right_emb))
-                if distance <= threshold:
-                    duplicates.append(
-                        {
-                            "left_id": left_id,
-                            "left_name": left_name,
-                            "left_image_count": left_count,
-                            "right_id": right_id,
-                            "right_name": right_name,
-                            "right_image_count": right_count,
-                            "distance": distance,
-                        }
-                    )
-        duplicates.sort(key=lambda item: item["distance"])
-        return duplicates
-
-    def _trim_customer_embeddings_if_needed(self, customer_id: int, max_active: int = RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER) -> int:
-        """Keep only the newest high-level active embeddings for a customer.
-
-        The app is designed for 1,000-5,000 standalone pharmacy customers. If one
-        customer is updated repeatedly, unlimited embeddings would make FAISS
-        larger without much benefit. We keep the newest active embeddings and
-        deactivate older ones instead of deleting them immediately.
-        """
-        max_active = max(1, int(max_active))
-        rows = self.conn.execute(
-            """
-            SELECT id
-            FROM face_embeddings
-            WHERE customer_id = ? AND is_active = 1
-            ORDER BY created_at DESC, id DESC
-            """,
-            (customer_id,),
-        ).fetchall()
-        ids = [int(row["id"]) for row in rows]
-        if len(ids) <= max_active:
-            return 0
-        keep_ids = set(ids[:max_active])
-        deactivate_ids = [embedding_id for embedding_id in ids if embedding_id not in keep_ids]
-        self.conn.executemany(
-            "UPDATE face_embeddings SET is_active = 0 WHERE id = ?",
-            [(embedding_id,) for embedding_id in deactivate_ids],
-        )
-        return len(deactivate_ids)
-
     def add_or_update_customer(self, name: str, new_embeddings: list[np.ndarray]) -> None:
         clean_name = name.strip()
         valid_embeddings: list[np.ndarray] = []
@@ -437,14 +289,8 @@ class Database:
                     (customer_id, emb, now),
                 )
 
-            deactivated = self._trim_customer_embeddings_if_needed(customer_id)
             self._refresh_customer_embedding_summary(customer_id, now)
             self.conn.commit()
-            if deactivated:
-                print(
-                    f"Customer {customer_id}: deactivated {deactivated} old face embeddings "
-                    f"to keep the active profile compact."
-                )
 
     def rename_customer(self, customer_id: int, new_name: str) -> None:
         clean_name = new_name.strip()
@@ -563,6 +409,7 @@ class Database:
         now = self._utc_now()
         clean_name = predicted_name.strip() if predicted_name else None
         with self._lock:
+            self._ensure_open()
             customer_id = self.find_customer_id_by_name(clean_name) if clean_name else None
             self.conn.execute(
                 """

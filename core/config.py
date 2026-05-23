@@ -18,6 +18,35 @@ def get_app_path() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def get_bundle_path() -> Path:
+    """Return the PyInstaller internal resource folder when frozen.
+
+    In PyInstaller onedir builds, application data files such as assets/logo.png
+    usually live under sys._MEIPASS, which points to dist/FaceLens/_internal.
+    Runtime writable data still belongs beside FaceLens.exe, returned by
+    get_app_path().
+    """
+    bundle_path = getattr(sys, "_MEIPASS", None)
+    if bundle_path:
+        return Path(bundle_path).resolve()
+    return get_app_path()
+
+
+def resolve_resource_path(relative_path: str | Path) -> Path:
+    """Find a read-only bundled resource in source or frozen builds."""
+    relative = Path(relative_path)
+    candidates = [
+        get_app_path() / relative,
+        get_bundle_path() / relative,
+        get_app_path() / "_internal" / relative,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    # Return the source-style path as a stable fallback. Callers can check exists().
+    return get_app_path() / relative
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -28,7 +57,9 @@ def env_bool(name: str, default: bool = False) -> bool:
 APP_PATH = get_app_path()
 DATA_DIR = APP_PATH / "data"
 TEMP_DIR = APP_PATH / "temp_files"
-ASSETS_DIR = APP_PATH / "assets"
+ASSETS_DIR = resolve_resource_path("assets")
+LOGO_PNG_PATH = resolve_resource_path("assets/logo.png")
+LOGO_ICO_PATH = resolve_resource_path("assets/logo.ico")
 DB_PATH = DATA_DIR / "facelens.db"
 LOG_DIR = APP_PATH / "logs"
 BACKUP_DIR = APP_PATH / "backups"

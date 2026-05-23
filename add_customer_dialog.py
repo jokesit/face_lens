@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtGui import QImage, QPixmap
 
 from core.database import Database
+from core.config import MAX_SNAPSHOTS, VERIFICATION_THRESHOLD
 # ไม่ต้อง import FaceRecognizer ที่นี่อีกต่อไป
 
 DIALOG_STYLESHEET = """
@@ -59,7 +60,7 @@ class AddCustomerDialog(QDialog):
     request_verification_job = Signal(list, str)
     customer_saved_signal = Signal()
 
-    VERIFICATION_THRESHOLD = 0.75
+    VERIFICATION_THRESHOLD = VERIFICATION_THRESHOLD
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -69,7 +70,7 @@ class AddCustomerDialog(QDialog):
         
         self.db = Database()
         self.is_capture_mode = False
-        self.MAX_SNAPSHOTS = 5
+        self.MAX_SNAPSHOTS = MAX_SNAPSHOTS
         self.captured_embeddings = []
         self.current_frame = None
 
@@ -137,7 +138,7 @@ class AddCustomerDialog(QDialog):
     @Slot(str, float)
     def on_verification_finished(self, name, distance):
         self.save_button.setEnabled(True); self.save_button.setText("Save Customer")
-        if distance < 0: # ใช้ค่าติดลบเป็นตัวบ่งชี้ "ลูกค้าใหม่"
+        if distance is None or distance < 0: # ใช้ค่าติดลบเป็นตัวบ่งชี้ "ลูกค้าใหม่"
             self.perform_save(name, self.captured_embeddings)
         elif distance < self.VERIFICATION_THRESHOLD:
             reply = QMessageBox.question(self, "Confirm Update", f"A customer named '{name}' already exists, and the face seems to match.\n\nDo you want to add the new snapshots to their profile?", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)

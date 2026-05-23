@@ -1,0 +1,70 @@
+# 1. Virtual Environment
+venv/
+.venv/
+
+# 2. Local configuration / secrets
+config.ini
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+private_keys/
+license_private_key*
+
+# 3. Python Cache
+__pycache__/
+*.py[cod]
+
+# 4. PyInstaller Build Artifacts
+build/
+dist/
+
+# IMPORTANT:
+# Do NOT ignore *.spec because main.spec is production release source.
+# *.spec
+
+# 5. Inno Setup Build Artifacts
+Output/
+
+# Ignore generated installer output files
+*.exe
+
+# But allow release/build source scripts if needed
+!main.spec
+!dpos_installer.iss
+
+# If you keep installer source files inside DPOS_Installer,
+# do not ignore the whole folder. Ignore only generated subfolders/files.
+DPOS_Installer/DPOS/
+DPOS_Installer/Output/
+DPOS_Installer/*.exe
+
+# Allow installer script/source files in DPOS_Installer
+!DPOS_Installer/
+!DPOS_Installer/*.iss
+!DPOS_Installer/README*
+!DPOS_Installer/*.txt
+!DPOS_Installer/*.md
+
+# 6. Database dumps / local databases
+*.dump
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+
+# 7. Log Files
+*.log
+dpos_app.log
+
+# 8. Generated handoff / temporary files
+project_code_part_1.txt
+project_code_part_2.txt
+handoff/
+project_structure.txt

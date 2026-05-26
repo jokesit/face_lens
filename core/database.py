@@ -10,7 +10,12 @@ from pathlib import Path
 
 import numpy as np
 
-from core.config import DB_PATH, RECOGNITION_EVENTS_RETENTION_DAYS, STANDALONE_WARN_EMBEDDINGS
+from core.config import (
+    DB_PATH,
+    RECOGNITION_EVENTS_RETENTION_DAYS,
+    RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER,
+    STANDALONE_WARN_EMBEDDINGS,
+)
 
 
 class Database:
@@ -289,6 +294,10 @@ class Database:
                     (customer_id, emb, now),
                 )
 
+            self._deactivate_old_embeddings_for_customer(
+                customer_id,
+                max_active=RECOMMENDED_MAX_EMBEDDINGS_PER_CUSTOMER,
+            )
             self._refresh_customer_embedding_summary(customer_id, now)
             self.conn.commit()
 
@@ -398,6 +407,151 @@ class Database:
                 (name.strip(),),
             ).fetchone()
         return int(row["id"]) if row else None
+
+
+    def _deactivate_old_embeddings_for_customer(self, customer_id: int, max_active: int) -> int:
+        """Keep only the newest active embeddings for one customer.
+
+        Enrollment can happen repeatedly during real shop use. Keeping every
+        captured vector forever makes the FAISS index larger, startup slower,
+        and duplicate checks noisier. This method preserves the newest active
+        vectors and marks older vectors inactive instead of deleting them.
+        """
+        max_active = max(1, int(max_active))
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM face_embeddings
+            WHERE customer_id = ? AND is_active = 1
+            ORDER BY datetime(created_at) DESC, id DESC
+            """,
+            (customer_id,),
+        ).fetchall()
+        old_ids = [int(row["id"]) for row in rows[max_active:]]
+        if not old_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in old_ids)
+        self.conn.execute(
+            f"UPDATE face_embeddings SET is_active = 0 WHERE id IN ({placeholders})",
+            old_ids,
+        )
+        return len(old_ids)
+
+    def find_nearest_customers_by_embedding(self, embedding: np.ndarray, limit: int = 5) -> list[dict]:
+        """Return active customers with centroids closest to the supplied embedding."""
+        try:
+            query = self._normalize_embedding(embedding)
+        except ValueError:
+            return []
+
+        limit = max(1, int(limit))
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    c.id,
+                    c.name,
+                    c.avg_embedding,
+                    c.image_count,
+                    COUNT(fe.id) AS active_embedding_count
+                FROM customers c
+                LEFT JOIN face_embeddings fe
+                    ON fe.customer_id = c.id AND fe.is_active = 1
+                WHERE c.deleted_at IS NULL
+                  AND c.consent_status = 'granted'
+                  AND c.avg_embedding IS NOT NULL
+                GROUP BY c.id
+                """
+            ).fetchall()
+
+        matches: list[dict] = []
+        for row in rows:
+            avg_embedding = row["avg_embedding"]
+            if not isinstance(avg_embedding, np.ndarray):
+                continue
+            distance = float(np.linalg.norm(query - self._normalize_embedding(avg_embedding)))
+            matches.append(
+                {
+                    "customer_id": int(row["id"]),
+                    "name": row["name"],
+                    "distance": distance,
+                    "image_count": int(row["image_count"] or 0),
+                    "active_embedding_count": int(row["active_embedding_count"] or 0),
+                }
+            )
+
+        matches.sort(key=lambda item: item["distance"])
+        return matches[:limit]
+
+    def find_possible_duplicate_customers(
+        self,
+        threshold: float,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return likely duplicate customer pairs based on centroid distance.
+
+        This is intended for manual review only. It never merges or deletes data.
+        """
+        threshold = float(threshold)
+        limit = max(1, int(limit))
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, name, avg_embedding, image_count
+                FROM customers
+                WHERE deleted_at IS NULL
+                  AND consent_status = 'granted'
+                  AND avg_embedding IS NOT NULL
+                ORDER BY id
+                """
+            ).fetchall()
+
+        customers: list[tuple[int, str, np.ndarray, int]] = []
+        for row in rows:
+            avg_embedding = row["avg_embedding"]
+            if isinstance(avg_embedding, np.ndarray):
+                try:
+                    customers.append(
+                        (
+                            int(row["id"]),
+                            str(row["name"]),
+                            self._normalize_embedding(avg_embedding),
+                            int(row["image_count"] or 0),
+                        )
+                    )
+                except ValueError:
+                    continue
+
+        if len(customers) < 2:
+            return []
+
+        ids = [item[0] for item in customers]
+        names = [item[1] for item in customers]
+        vectors = np.asarray([item[2] for item in customers], dtype=np.float32)
+        counts = [item[3] for item in customers]
+
+        duplicates: list[dict] = []
+        for left_index in range(len(customers) - 1):
+            right_vectors = vectors[left_index + 1 :]
+            distances = np.linalg.norm(right_vectors - vectors[left_index], axis=1)
+            close_offsets = np.where(distances <= threshold)[0]
+            for offset in close_offsets:
+                right_index = left_index + 1 + int(offset)
+                duplicates.append(
+                    {
+                        "left_customer_id": ids[left_index],
+                        "left_name": names[left_index],
+                        "left_image_count": counts[left_index],
+                        "right_customer_id": ids[right_index],
+                        "right_name": names[right_index],
+                        "right_image_count": counts[right_index],
+                        "distance": float(distances[int(offset)]),
+                    }
+                )
+
+        duplicates.sort(key=lambda item: item["distance"])
+        return duplicates[:limit]
 
     def log_recognition_event(
         self,
